@@ -73,4 +73,28 @@ WEB_TIMEOUT=300        # 配置界面自动关闭秒数(默认 5 分钟)
 
 ## 卸载
 
-Magisk 卸载模块后,如需清理: `rm -rf /data/adb/tpdp`
+Magisk app → 模块 → 本模块 → **「卸载」**按钮 → 重启。v1.2.1 起清理完全自动化：
+
+**卸载时会发生什么**:
+1. 点击卸载后模块进入"待卸载"状态(重启后生效;此期间可点「还原」撤销);
+2. 重启时 Magisk 删除模块本体(代码、Web 界面、staged 更新),并执行 `uninstall.sh`:
+   - 终止看门狗守护进程、Web 服务(httpd)及超时脚本(若仍在运行);
+   - 删除 `/data/adb/tpdp/`(配置、日志、pid 文件全部清除);
+3. 模块**不创建**数据库、系统注册项、缓存或系统属性,卸载后无任何残留。
+   (唯一相关的 `persist.adb.tcp.port` 是无线 ADB 的用户设置,早于本模块存在,
+   卸载不触碰;不再需要无线 ADB 可执行 `adb shell su -c 'setprop persist.adb.tcp.port -1'`)
+
+**卸载后自检**(确认系统功能不受影响):
+```sh
+adb shell su -c 'ls /data/adb/modules/ | grep tab_dp'      # 应无输出
+adb shell su -c 'ls /data/adb/tpdp 2>&1'                   # 应报 No such file
+adb shell su -c 'cat /sys/class/extcon/extcon0/state'      # DP=1 外接屏仍正常
+adb shell su -c 'pgrep -f tab_dp_watchdog'                 # 应无输出(无残留进程)
+```
+
+**卸载失败/出问题时的回滚**:
+- 卸载前想撤销:直接点 Magisk 的「还原」按钮(卸载未生效前随时可反悔);
+- 卸载后想恢复:重新安装 `tab-dp-watchdog-vX.Y.Z.zip` 即可(所有功能立即回归,
+  无需任何手工修复);
+- 万一模块导致开机异常:安全模式(开机动画时长按音量减)会自动禁用所有模块,
+  进入后卸载本模块再重启;极端情况 `adb shell magisk --remove-modules` 移除全部模块。

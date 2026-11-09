@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.2.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.2.1-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
