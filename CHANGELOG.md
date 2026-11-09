@@ -3,6 +3,14 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.0.1
+
+### 修复
+
+- `action.sh`（Magisk"执行"按钮）在 DP 链路健康时不再执行虚拟拔插。
+  此前无条件拔插会导致正在使用的画面出现数秒闪断；
+  现在先检查 extcon 状态，链路正常则直接退出并提示 "Nothing to do"。
+
 ## v1.0.0
 
 首次发布。

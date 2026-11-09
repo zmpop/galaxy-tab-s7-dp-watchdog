@@ -1,6 +1,6 @@
 id=tab_dp_watchdog
 name=Tab S7 DP Link Watchdog
-version=v1.0.0
-versionCode=10000
+version=v1.0.1
+versionCode=10001
 author=zmpop
 description=Watch DP Alt Mode link over USB-C. If the external touchscreen (USB 04f3:8512) is online while extcon reports DP=0 (e.g. after reboot or power-applied-after-cable), perform a virtual replug (port_type sink->dual) to force full CC/PD/VDM renegotiation and restore the display automatically.
