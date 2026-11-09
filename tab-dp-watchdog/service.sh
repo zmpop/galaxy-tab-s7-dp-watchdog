@@ -81,7 +81,9 @@ virtual_replug() {
     return 1
 }
 
-log "===== service v1.2.0 started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID) ====="
+MODVER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
+[ -n "$MODVER" ] || MODVER=unknown
+log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID) ====="
 sleep "$BOOT_DELAY"
 
 strike=0
