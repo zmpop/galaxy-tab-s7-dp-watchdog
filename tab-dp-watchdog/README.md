@@ -1,4 +1,4 @@
-# Tab S7 DP Link Watchdog (Magisk 模块)
+# Tab S7 DP 显示链路看门狗 (Tab S7 DP Link Watchdog)
 
 ## 解决什么问题
 
