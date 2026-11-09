@@ -1,0 +1,112 @@
+#!/system/bin/sh
+# CGI: list USB devices as JSON.
+#   QUERY_STRING: mode=auto  -> only screen-related devices (scored)
+#                 mode=all   -> every external USB device
+# Runs as root under busybox httpd.
+
+echo "Content-Type: application/json"
+echo ""
+
+MODE=all
+case "$QUERY_STRING" in
+    mode=auto) MODE=auto ;;
+    mode=all)  MODE=all ;;
+esac
+
+CFG=/data/adb/tpdp/config
+TP_VID=04f3; TP_PID=8512
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+
+jesc() {
+    printf '%s' "$*" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n\t'
+}
+
+cls_name() {
+    case "$1" in
+        02) echo "CDC通信类" ;;
+        03) echo "HID人机接口" ;;
+        06) echo "成像类" ;;
+        07) echo "打印类" ;;
+        08) echo "大容量存储" ;;
+        09) echo "USB集线器" ;;
+        0a) echo "CDC数据" ;;
+        0e) echo "视频类" ;;
+        e0) echo "无线类" ;;
+        ef) echo "杂项设备" ;;
+        ff) echo "厂商自定义" ;;
+        *)  echo "类$1" ;;
+    esac
+}
+
+items=""
+count=0
+
+for d in /sys/bus/usb/devices/*; do
+    name=${d##*/}
+    case "$name" in *:*) continue ;; esac      # interface, not a device
+    case "$name" in usb*) continue ;; esac     # internal root hub
+    [ -f "$d/idVendor" ] || continue
+    vid=$(cat "$d/idVendor" 2>/dev/null)
+    pid=$(cat "$d/idProduct" 2>/dev/null)
+    [ -n "$vid" ] && [ -n "$pid" ] || continue
+
+    prod=$(cat "$d/product" 2>/dev/null)
+    manuf=$(cat "$d/manufacturer" 2>/dev/null)
+    serial=$(cat "$d/serial" 2>/dev/null)
+    speed=$(cat "$d/speed" 2>/dev/null)
+
+    # gather interface classes + human-readable description
+    classlist=""
+    clsdesc=""
+    for iface in ${d}:*; do
+        [ -f "$iface/bInterfaceClass" ] || continue
+        c=$(cat "$iface/bInterfaceClass" 2>/dev/null | tr 'A-F' 'a-f')
+        [ -n "$c" ] || continue
+        case ",$classlist," in
+            *",$c,"*) ;;
+            *) classlist="$classlist,$c"
+               clsdesc="$clsdesc$(cls_name "$c") " ;;
+        esac
+    done
+    devclass=$(cat "$d/bDeviceClass" 2>/dev/null | tr 'A-F' 'a-f')
+    if [ "$devclass" = "09" ]; then
+        case ",$classlist," in
+            *,09,*) ;;
+            *) classlist="$classlist,09"; clsdesc="$clsdesc$(cls_name 09) " ;;
+        esac
+    fi
+
+    cur=0
+    [ "$vid" = "$TP_VID" ] && [ "$pid" = "$TP_PID" ] && cur=1
+
+    # ---- auto-mode scoring ----
+    txt="$(printf '%s %s' "$prod" "$manuf" | tr '[:upper:]' '[:lower:]')"
+    reason=""; score=0
+    printf '%s' "$txt" | grep -q 'touch' && {
+        reason="设备名含触摸(touch)"; score=90; }
+    printf '%s' "$txt" | grep -qE 'screen|display|monitor|lcd' && {
+        reason="${reason:+$reason; }设备名含显示(screen/display)"; [ "$score" -lt 85 ] && score=85; }
+    printf '%s' "$txt" | grep -qE 'dock|hub' && {
+        reason="${reason:+$reason; }坞站/集线器"; [ "$score" -lt 55 ] && score=55; }
+    case ",$classlist," in
+        *,09,*) reason="${reason:+$reason; }USB集线器"; [ "$score" -lt 55 ] && score=55 ;;
+    esac
+    case ",$classlist," in
+        *,03,*) [ "$score" -lt 40 ] && { reason="${reason:+$reason; }HID设备(触摸/键鼠)"; score=40; } ;;
+    esac
+    case ",$classlist," in
+        *,0e,*) [ "$score" -lt 30 ] && { reason="${reason:+$reason; }视频类接口"; score=30; } ;;
+    esac
+    [ "$cur" = "1" ] && {
+        reason="${reason:+$reason; }当前配置的设备"; [ "$score" -lt 95 ] && score=95; }
+
+    if [ "$MODE" = "auto" ] && [ "$score" = "0" ]; then
+        continue
+    fi
+
+    [ -n "$items" ] && items="$items,"
+    items="$items{\"vid\":\"$vid\",\"pid\":\"$pid\",\"product\":\"$(jesc "$prod")\",\"manufacturer\":\"$(jesc "$manuf")\",\"serial\":\"$(jesc "$serial")\",\"location\":\"$name\",\"classes\":\"$(jesc "$clsdesc")\",\"speed\":\"${speed} Mbps\",\"reason\":\"$(jesc "$reason")\",\"score\":$score,\"current\":$cur}"
+    count=$((count + 1))
+done
+
+printf '{"mode":"%s","count":%d,"current":"%s:%s","devices":[%s]}\n' "$MODE" "$count" "$TP_VID" "$TP_PID" "$items"

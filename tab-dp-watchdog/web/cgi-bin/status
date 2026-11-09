@@ -1,0 +1,39 @@
+#!/system/bin/sh
+# CGI: current watchdog status as JSON.
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+
+dp=0
+grep -q 'DP=1' /sys/class/extcon/extcon0/state 2>/dev/null && dp=1
+
+tp=0
+for d in /sys/bus/usb/devices/*; do
+    case "${d##*/}" in *:*) continue ;; esac
+    [ -f "$d/idVendor" ] || continue
+    if [ "$(cat "$d/idVendor" 2>/dev/null)" = "$TP_VID" ] && \
+       [ "$(cat "$d/idProduct" 2>/dev/null)" = "$TP_PID" ]; then
+        tp=1; break
+    fi
+done
+
+daemon=0
+pgrep -f 'modules/tab_dp_watchdog/service.sh' >/dev/null 2>&1 && daemon=1
+
+remain=-1
+if [ -f "$LOGDIR/web.start" ]; then
+    st=$(cat "$LOGDIR/web.start" 2>/dev/null)
+    now=$(date +%s)
+    [ -n "$st" ] && remain=$(( st + WEB_TIMEOUT - now ))
+fi
+[ "$remain" -gt 0 ] 2>/dev/null || remain=0
+
+cfg=0
+[ -f "$CFG" ] && cfg=1
+
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d}\n' \
+    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain"

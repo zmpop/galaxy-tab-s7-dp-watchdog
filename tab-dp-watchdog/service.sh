@@ -1,7 +1,10 @@
 #!/system/bin/sh
-# Tab S7 DP Link Watchdog v1.1.0 - service entry
+# Tab S7 DP Link Watchdog v1.2.0 - service entry
 # Runs as root (u:r:magisk:s0) at late_start service mode.
 #
+# v1.2.0: config hot-reload. When /data/adb/tpdp/config changes
+#   (e.g. a device is saved from the web UI), the watchdog reloads
+#   TP_VID/TP_PID and poll parameters within one poll cycle.
 # v1.1.0: added "wedged port" detection.
 #   Fault B: DP was up earlier this session, now down, and the port is
 #   wedged (partner present/flickering but no stable attach, touch absent).
@@ -27,6 +30,9 @@ BOOT_DELAY=20          # seconds to wait after service start
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
+
+cfg_mtime=0
+[ -f "$LOGDIR/config" ] && cfg_mtime=$(date -r "$LOGDIR/config" +%s 2>/dev/null || echo 0)
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
@@ -75,7 +81,7 @@ virtual_replug() {
     return 1
 }
 
-log "===== service v1.1.0 started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID) ====="
+log "===== service v1.2.0 started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID) ====="
 sleep "$BOOT_DELAY"
 
 strike=0
@@ -84,6 +90,17 @@ ever_dp_up=0
 
 while true; do
     sleep "$POLL_SEC"
+
+    # hot-reload config if it changed (e.g. saved from the web UI)
+    if [ -f "$LOGDIR/config" ]; then
+        mt=$(date -r "$LOGDIR/config" +%s 2>/dev/null || echo 0)
+        if [ "$mt" != "$cfg_mtime" ]; then
+            cfg_mtime=$mt
+            . "$LOGDIR/config" 2>/dev/null
+            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s"
+            strike=0
+        fi
+    fi
 
     if dp_up; then
         ever_dp_up=1

@@ -1,0 +1,45 @@
+#!/system/bin/sh
+# CGI: save selected device (POST vid=xxxx&pid=xxxx) into config.
+# The daemon hot-reloads the config within a few seconds.
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+mkdir -p "$LOGDIR"
+
+body=""
+if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ]; then
+    body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+vid=$(printf '%s' "$body" | sed -n 's/.*vid=\([0-9a-fA-F]\{4\}\).*/\1/p')
+pid=$(printf '%s' "$body" | sed -n 's/.*pid=\([0-9a-fA-F]\{4\}\).*/\1/p')
+
+if [ -z "$vid" ] || [ -z "$pid" ]; then
+    printf '{"ok":false,"msg":"参数无效：需要 4 位十六进制的 vid 与 pid"}'
+    exit 0
+fi
+vid=$(printf '%s' "$vid" | tr 'A-F' 'a-f')
+pid=$(printf '%s' "$pid" | tr 'A-F' 'a-f')
+
+# the device must be online right now
+found=0
+for d in /sys/bus/usb/devices/*; do
+    case "${d##*/}" in *:*) continue ;; esac
+    [ -f "$d/idVendor" ] || continue
+    if [ "$(cat "$d/idVendor" 2>/dev/null)" = "$vid" ] && \
+       [ "$(cat "$d/idProduct" 2>/dev/null)" = "$pid" ]; then
+        found=1; break
+    fi
+done
+if [ "$found" = "0" ]; then
+    printf '{"ok":false,"msg":"设备 %s:%s 当前不在线，请先连接设备再保存"}' "$vid" "$pid"
+    exit 0
+fi
+
+touch "$CFG"
+sed -i '/^TP_VID=/d; /^TP_PID=/d' "$CFG" 2>/dev/null
+printf 'TP_VID=%s\nTP_PID=%s\n' "$vid" "$pid" >> "$CFG"
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: target device saved: $vid:$pid (daemon will reload)" >> "$LOGDIR/log"
+printf '{"ok":true,"vid":"%s","pid":"%s","msg":"已保存，守护进程将在数秒内自动加载新设备"}' "$vid" "$pid"

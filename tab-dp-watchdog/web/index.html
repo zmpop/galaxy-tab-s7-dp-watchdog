@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DP 看门狗 · USB 设备选择</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--line:#e3e6ea;--tx:#1c2128;--sub:#6b7480;--acc:#2563eb;--ok:#16a34a;--err:#dc2626}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--tx);padding:16px;max-width:640px;margin:0 auto}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+h1{font-size:18px}
+#timer{font-size:13px;color:var(--sub);background:var(--card);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+#timer.low{color:var(--err);border-color:var(--err)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.card h2{font-size:15px;margin-bottom:6px}
+.hint{font-size:12px;color:var(--sub);margin-bottom:10px;line-height:1.6}
+.btn{display:inline-block;border:none;border-radius:8px;padding:10px 16px;font-size:14px;background:var(--acc);color:#fff;cursor:pointer}
+.btn.sub{background:#eef2f7;color:var(--tx);border:1px solid var(--line)}
+.btn:disabled{opacity:.5;cursor:default}
+#statusLine{font-size:13px;color:var(--sub);line-height:1.8}
+#statusLine b{color:var(--tx);font-family:ui-monospace,monospace}
+.badge{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;margin-left:6px;vertical-align:1px}
+.badge.ok{background:#e7f6ec;color:var(--ok)}
+.badge.bad{background:#fdeaea;color:var(--err)}
+.badge.cur{background:#e8effc;color:var(--acc)}
+.dev{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px;cursor:pointer}
+.dev.sel{border-color:var(--acc);background:#f0f5ff}
+.dev input{margin-top:3px;flex:none}
+.dev .meta{flex:1;min-width:0}
+.dev .vidpid{font-weight:600;font-family:ui-monospace,monospace}
+.dev .name{font-size:13px;margin-top:2px}
+.dev .sub{font-size:12px;color:var(--sub);margin-top:2px;word-break:break-all}
+.dev .reason{font-size:12px;color:var(--acc);margin-top:2px}
+#saveBar{position:sticky;bottom:0;padding:10px 0;background:var(--bg);display:flex;gap:8px}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:80px;background:#1c2128;color:#fff;font-size:13px;border-radius:8px;padding:8px 14px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%;z-index:9}
+#toast.show{opacity:.95}
+#closed{position:fixed;inset:0;background:rgba(245,246,248,.97);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;text-align:center;padding:20px;z-index:99}
+#closed .big{font-size:16px;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>USB 设备选择</h1>
+  <div id="timer">--:--</div>
+</header>
+
+<div class="card">
+  <h2>当前状态</h2>
+  <div id="statusLine">加载中…</div>
+</div>
+
+<div class="card">
+  <h2>① 自动搜索屏幕相关设备</h2>
+  <p class="hint">根据设备名称与 USB 类别（触摸 / 显示 / 坞站 / 集线器）自动筛选出推荐设备。</p>
+  <button class="btn" id="btnAuto">自动搜索</button>
+</div>
+
+<div class="card">
+  <h2>② 手动列出全部 USB 设备</h2>
+  <p class="hint">展示当前所有外接 USB 设备，由你自行挑选目标设备。</p>
+  <button class="btn sub" id="btnAll">列出全部设备</button>
+</div>
+
+<div class="card">
+  <h2>设备列表</h2>
+  <p class="hint" id="listHint">请选择一种方式获取设备。</p>
+  <div id="devList"></div>
+</div>
+
+<div id="saveBar">
+  <button class="btn" id="btnSave" disabled>保存所选设备</button>
+  <button class="btn sub" id="btnRecover">尝试恢复显示链路</button>
+</div>
+
+<div class="card">
+  <h2>说明</h2>
+  <p class="hint">保存后守护进程会在数秒内自动加载新设备（无需重启平板）。<br>
+  本界面开启 <b>5 分钟</b>后将自动关闭（无论是否进行操作）；需要再次打开时，请在 Magisk 模块列表中点击「执行」按钮。</p>
+</div>
+
+<div id="toast"></div>
+<div id="closed">
+  <div class="big">服务已关闭</div>
+  <div style="font-size:13px;color:var(--sub)">界面已超过 5 分钟自动关闭（或服务已停止）。<br>请在 Magisk 模块列表中重新点击「执行」按钮。</div>
+</div>
+
+<script>
+var selected=null, remain=null, closed=false;
+
+function $(id){return document.getElementById(id)}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function toast(msg,ms){var t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show')},ms||3500)}
+function fmt(s){if(s<0)s=0;var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r}
+
+function showClosed(){
+  if(closed)return; closed=true;
+  $('closed').style.display='flex';
+  $('timer').textContent='已关闭';
+  var bs=document.querySelectorAll('button');
+  for(var i=0;i<bs.length;i++){bs[i].disabled=true}
+}
+
+function tick(){
+  if(remain===null||closed)return;
+  remain--;
+  if(remain<60)$('timer').classList.add('low');
+  $('timer').textContent='自动关闭 '+fmt(remain);
+  if(remain<=0)showClosed();
+}
+
+function fetchStatus(){
+  if(closed)return;
+  fetch('cgi-bin/status').then(function(r){return r.json()}).then(function(s){
+    var h='<b>'+esc(s.vid)+':'+esc(s.pid)+'</b>';
+    h+='<br>DP 显示链路: '+(s.dp?'<span class="badge ok">正常</span>':'<span class="badge bad">断开</span>');
+    h+='&nbsp;&nbsp;目标触摸设备: '+(s.tp_online?'<span class="badge ok">在线</span>':'<span class="badge bad">离线</span>');
+    h+='<br>守护进程: '+(s.daemon?'<span class="badge ok">运行中</span>':'<span class="badge bad">未运行</span>');
+    h+='&nbsp;&nbsp;配置文件: '+(s.config?'已保存':'默认值');
+    $('statusLine').innerHTML=h;
+    if(typeof s.remain==='number'&&s.remain>=0){remain=s.remain}
+  }).catch(function(){showClosed()});
+}
+
+function renderDevs(data){
+  var list=$('devList');list.innerHTML='';
+  $('listHint').textContent=data.count?('点击选择一个设备（当前配置: '+data.current+'）'):'没有符合条件的设备，请尝试「列出全部设备」。';
+  data.devices.forEach(function(d){
+    var el=document.createElement('label');el.className='dev';
+    var radio='<input type="radio" name="dev" value="'+d.vid+':'+d.pid+'">';
+    var meta='<span class="meta"><span class="vidpid">'+d.vid+':'+d.pid+(d.current?'<span class="badge cur">当前</span>':'')+'</span>'
+      +'<div class="name">'+esc(d.product||'（未命名设备）')+'</div>'
+      +'<div class="sub">'+esc(d.manufacturer||'')+(d.manufacturer&&d.serial?' · ':'')+(d.serial?('S/N '+esc(d.serial)):'')+' · 位置 '+esc(d.location)+' · '+esc(d.classes)+' · '+esc(d.speed)+'</div>'
+      +(d.reason?'<div class="reason">识别: '+esc(d.reason)+'</div>':'')
+      +'</span>';
+    el.innerHTML=radio+meta;
+    el.querySelector('input').addEventListener('change',function(){
+      var all=document.querySelectorAll('.dev');
+      for(var i=0;i<all.length;i++){all[i].classList.remove('sel')}
+      el.classList.add('sel');selected=d.vid+':'+d.pid;$('btnSave').disabled=false;
+    });
+    list.appendChild(el);
+  });
+}
+
+function loadDevs(mode){
+  if(closed)return;
+  $('listHint').textContent='正在获取设备列表…';
+  fetch('cgi-bin/devices?mode='+mode).then(function(r){return r.json()}).then(renderDevs)
+   .catch(function(){$('listHint').textContent='获取失败：服务可能已关闭。';showClosed()});
+}
+
+$('btnAuto').addEventListener('click',function(){loadDevs('auto')});
+$('btnAll').addEventListener('click',function(){loadDevs('all')});
+
+$('btnSave').addEventListener('click',function(){
+  if(!selected)return;
+  var p=selected.split(':');
+  fetch('cgi-bin/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'vid='+p[0]+'&pid='+p[1]})
+   .then(function(r){return r.json()})
+   .then(function(res){
+     if(res.ok){toast('已保存 '+res.vid+':'+res.pid+'，守护进程将自动生效')}
+     else{toast('保存失败: '+(res.msg||'未知错误'),6000)}
+     fetchStatus();
+   })
+   .catch(function(){toast('保存失败：服务已关闭');showClosed()});
+});
+
+$('btnRecover').addEventListener('click',function(){
+  if(closed)return;
+  var b=this;b.disabled=true;b.textContent='恢复中…';
+  fetch('cgi-bin/recover',{method:'POST'})
+   .then(function(r){return r.json()})
+   .then(function(res){toast(res.msg||'完成',5000);fetchStatus()})
+   .catch(function(){toast('请求失败：服务已关闭');showClosed()})
+   .then(function(){b.disabled=false;b.textContent='尝试恢复显示链路'});
+});
+
+fetchStatus();
+setInterval(fetchStatus,3000);
+setInterval(tick,1000);
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 id=tab_dp_watchdog
 name=Tab S7 DP 显示链路看门狗 (Tab S7 DP Link Watchdog)
-version=v1.1.1
-versionCode=11001
+version=v1.2.0
+versionCode=12000
 author=WorkBuddy
-description=监控 USB-C DP Alt Mode 显示链路：当外接触摸屏（ELAN 04f3:8512）在线而内核报 DP=0（如重启后黑屏、先插线后供电、端口卡死）时，自动执行"虚拟拔插"（port_type sink→dual）强制 CC/PD/VDM 全链路重新协商，约 10 秒内自动恢复画面，无需手动拔线。可选配置 /data/adb/tpdp/config，日志 /data/adb/tpdp/log。
+description=监控 USB-C DP Alt Mode 显示链路：当外接触摸屏在线而内核报 DP=0（如重启后黑屏、先插线后供电、端口卡死）时，自动执行"虚拟拔插"（port_type sink→dual）强制全链路重新协商，约 10 秒内自动恢复画面，无需手动拔线。点击模块「执行」按钮可打开 USB 设备选择界面（自动搜索/手动列出全部设备，保存后守护进程热加载，界面 5 分钟自动关闭）。可选配置 /data/adb/tpdp/config，日志 /data/adb/tpdp/log。

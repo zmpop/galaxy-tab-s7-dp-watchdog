@@ -1,0 +1,37 @@
+#!/system/bin/sh
+# CGI: manual recovery attempt (virtual replug) via POST.
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+TYPEC_PORT=/sys/class/typec/port0
+EXTCON_STATE=/sys/class/extcon/extcon0/state
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+: ${TYPEC_PORT:=/sys/class/typec/port0}
+: ${EXTCON_STATE:=/sys/class/extcon/extcon0/state}
+mkdir -p "$LOGDIR"
+
+if grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null; then
+    printf '{"ok":false,"msg":"DP 链路当前正常，无需恢复"}'
+    exit 0
+fi
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: manual recover requested from web UI" >> "$LOGDIR/log"
+echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
+sleep 2
+echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
+
+i=0
+while [ $i -lt 15 ]; do
+    if grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') web: recover success (DP=1)" >> "$LOGDIR/log"
+        printf '{"ok":true,"msg":"恢复成功：DP 链路已重建"}'
+        exit 0
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: recover failed (DP still 0)" >> "$LOGDIR/log"
+printf '{"ok":false,"msg":"恢复未成功：15 秒内 DP 未恢复。请检查屏幕供电，或从电源端重新拔插 PD 供电线"}'

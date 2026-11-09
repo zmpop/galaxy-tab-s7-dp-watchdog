@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.1.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.2.0-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
@@ -41,9 +41,17 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 
 完整的根因分析（PD 协商 / DP Alt Mode 一次性握手 / 三星 max77705 驱动缺陷 / 供电顺序实验数据）见 **[docs/troubleshooting.md](docs/troubleshooting.md)**。
 
-## 配置
+## 配置与 USB 设备选择界面
 
-模块读取 `/data/adb/tpdp/config`（可选），支持自定义触摸屏 VID/PID、轮询间隔、防抖与重试参数。换屏幕后改 VID/PID 即可复用。详见 [tab-dp-watchdog/README.md](tab-dp-watchdog/README.md)。
+模块读取 `/data/adb/tpdp/config`（可选），支持自定义触摸屏 VID/PID、轮询间隔、防抖与重试参数。
+
+**v1.2.0 起无需手改配置文件**：点击 Magisk 模块的「执行」按钮，平板自动弹出 USB 设备选择界面（仅本机监听，开启 5 分钟自动关闭）：
+
+- **自动搜索** — 一键列出屏幕相关设备（触摸/显示/坞站/集线器，按名称与 USB 类别打分推荐）；
+- **手动列出** — 一键列出全部外接 USB 设备自行挑选；
+- **保存** — 写入配置后守护进程约 3 秒内热加载，无需重启。
+
+详见 [tab-dp-watchdog/README.md](tab-dp-watchdog/README.md)。
 
 ## 兼容性
 
@@ -59,7 +67,7 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 adb shell su -c 'tail -20 /data/adb/tpdp/log'
 # 看链路状态(DP=1 即健康)
 adb shell su -c 'cat /sys/class/extcon/extcon0/state'
-# 手动触发一次恢复
+# 打开 USB 设备选择界面 / 手动恢复
 #   Magisk app → 模块 → 本模块 → "执行" 按钮
 ```
 
