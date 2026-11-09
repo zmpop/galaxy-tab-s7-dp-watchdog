@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.1.0-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
@@ -14,11 +14,12 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 
 ## 覆盖的故障场景
 
-| # | 场景 | 触发条件 |
-|---|---|---|
-| 1 | 重启平板后黑屏 | 触摸屏 USB 在线 && `extcon DP=0` |
-| 2 | 先插一线通、后给屏幕供电，黑屏 | 同上（触摸屏上电枚举后接管） |
-| 3 | 运行中 DP 链路偶发掉线 | 同上 |
+| # | 场景 | 触发条件 | 检测版本 |
+|---|---|---|---|
+| 1 | 重启平板后黑屏 | 触摸屏 USB 在线 && `extcon DP=0` | v1.0.0 |
+| 2 | 先插一线通、后给屏幕供电，黑屏 | 同上（触摸屏上电枚举后接管） | v1.0.0 |
+| 3 | 运行中 DP 链路偶发掉线 | 同上 | v1.0.0 |
+| 4 | 从屏幕端拔插 PD 供电线后端口卡死 | 本次开机 DP 曾=1 && 现=0 && partner 在线/震荡 | v1.1.0 |
 
 平板单独使用（本次开机从未连接过屏幕）永不误触发；连接普通 PD 充电器、U 盘等 USB 配件不误触发。
 
@@ -32,12 +33,13 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 
 ```
 故障签名:  触摸屏 USB (04f3:8512) 在线  &&  /sys/class/extcon/extcon0/state 报 DP=0
+           （或 v1.1.0: 开机后 DP 曾=1 → 现=0 且 Type-C partner 在线/震荡）
 修复动作:  echo sink > /sys/class/typec/port0/port_type
            echo dual > /sys/class/typec/port0/port_type
            → CC 电气状态切换(虚拟拔插) → Type-C/PD/VDM/DP 全链路重新协商
 ```
 
-完整的根因分析（PD 协商 / DP Alt Mode 一次性握手 / 供电顺序）见后续文档。
+完整的根因分析（PD 协商 / DP Alt Mode 一次性握手 / 三星 max77705 驱动缺陷 / 供电顺序实验数据）见 **[docs/troubleshooting.md](docs/troubleshooting.md)**。
 
 ## 配置
 
@@ -48,7 +50,7 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 - **设备**: Galaxy Tab S7 / S7+（SM-T870 / SM-T970，SM8250 平台，Type-C 控制器 MAX77705）
 - **系统**: One UI 5 / Android 13 实测；同平台其他 One UI 版本理论可用（接口为标准内核 sysfs）
 - **Root**: Magisk 25+；KernelSU / APatch 理论兼容（customize.sh 已适配识别）
-- **已知边界**: 屏幕完全断电时模块不动作（无从判断目标存在）
+- **已知边界**: 屏幕完全断电时模块不动作（无从判断目标存在）；屏幕自身电源路径锁死时需"从电源端拔插供电线"恢复（详见 troubleshooting 文档）
 
 ## 日志与排错
 

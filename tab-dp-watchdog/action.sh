@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Manual action (Magisk app "Run" button): force one recovery attempt now.
+# Manual action (Magisk app "执行" button): force one recovery attempt now.
 LOGDIR=/data/adb/tpdp
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
 : ${TYPEC_PORT:=/sys/class/typec/port0}

@@ -3,6 +3,25 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.1.0
+
+### 新增
+
+- **故障 B 检测（端口卡死自救）**：本次开机 DP 曾=1、现=0、且 Type-C partner
+  在线/震荡时自动执行虚拟拔插。覆盖"从屏幕端拔插 PD 供电线"触发的
+  `max77705_port_type_set: invalid typec_role` 端口卡死场景
+  （实测时间线见 docs/troubleshooting.md）。
+- 完整根因分析文档 `docs/troubleshooting.md` 与原始实验数据
+  `docs/monitor-log-2026-11-09.txt`。
+
+### 修复
+
+- service.sh 启动日志变量名笔误（`${POLL}` → `${POLL_SEC}`，仅影响日志显示）。
+
+### 不兼容变更
+
+- 无。升级可直接覆盖安装。
+
 ## v1.0.1
 
 ### 修复
