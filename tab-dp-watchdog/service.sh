@@ -27,6 +27,7 @@ POLL_SEC=3             # poll interval
 STRIKES=2              # consecutive fault polls before action (debounce)
 MAX_RETRY=5            # recovery attempts per fault episode
 BOOT_DELAY=20          # seconds to wait after service start
+VIDEO_SWITCH=1         # 1 = cut DP video while the screen is off (screenvid)
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
@@ -39,6 +40,38 @@ log() {
     [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 524288 ] && \
         tail -n 400 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 }
+
+# ---------- screen gated video output (v1.3.0) ----------
+HPD_NODE=/sys/kernel/debug/drm_dp/hpd
+
+# Start screenvid if it is not running. Called once at startup and then on
+# every loop iteration, so a crashed gatekeeper is restarted within seconds.
+start_screenvid() {
+    [ "$VIDEO_SWITCH" = "1" ] || return 0
+    [ -f "$MODDIR/screenvid.sh" ] || return 0
+    [ -f "$LOGDIR/video.disabled" ] && return 0
+    pgrep -f 'modules/tab_dp_watchdog/screenvid.sh' >/dev/null 2>&1 && return 0
+    log "screenvid not running -> starting it"
+    nohup sh "$MODDIR/screenvid.sh" >/dev/null 2>&1 &
+}
+
+# At boot, never leave the external screen black because a previous session
+# died while the video output was cut: clear the marker and, if a partner is
+# attached while the connector is off, force HPD high.
+boot_video_failsafe() {
+    rm -f "$LOGDIR/video_off"
+    [ -e "$HPD_NODE" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    [ -e "$HPD_NODE" ] || return 0
+    # partner dir survives even when the DP link was cut, extcon DP may read 0
+    if [ ! -d /sys/class/typec/port0-partner ]; then
+        grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null || return 0
+    fi
+    if grep -q disconnected /sys/class/drm/card0-DP-1/status 2>/dev/null; then
+        echo 1 > "$HPD_NODE" 2>/dev/null
+        log "boot: DP link was down with a partner attached -> HPD forced high"
+    fi
+}
+# -------------------------------------------------------
 
 tp_online() {
     local d
@@ -84,6 +117,8 @@ virtual_replug() {
 MODVER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
 [ -n "$MODVER" ] || MODVER=unknown
 log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID) ====="
+boot_video_failsafe
+start_screenvid
 sleep "$BOOT_DELAY"
 
 strike=0
@@ -92,6 +127,10 @@ ever_dp_up=0
 
 while true; do
     sleep "$POLL_SEC"
+
+    # heartbeat for the mutual supervision with screenvid
+    date +%s > "$LOGDIR/hb.main"
+    start_screenvid
 
     # hot-reload config if it changed (e.g. saved from the web UI)
     if [ -f "$LOGDIR/config" ]; then
@@ -102,6 +141,22 @@ while true; do
             log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s"
             strike=0
         fi
+    fi
+
+    # Video output intentionally cut (screen off, handled by screenvid):
+    # DP=0 is expected here, so do NOT run fault recovery. If the marker is
+    # stale (gatekeeper gone), clear it and restore the link ourselves.
+    if [ -f "$LOGDIR/video_off" ]; then
+        vage=999
+        [ -f "$LOGDIR/hb.video" ] && \
+            vage=$(( $(date +%s) - $(stat -c %Y "$LOGDIR/hb.video" 2>/dev/null || echo 0) ))
+        if [ "$vage" -lt 120 ]; then
+            continue
+        fi
+        log "video_off marker stale (${vage}s) -> clearing, restoring video"
+        rm -f "$LOGDIR/video_off"
+        [ -e "$HPD_NODE" ] && echo 1 > "$HPD_NODE" 2>/dev/null
+        continue
     fi
 
     if dp_up; then

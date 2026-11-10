@@ -24,6 +24,19 @@ mkdir -p "$LOGDIR"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGDIR/log"; }
 
+# v1.3.0: manual last-resort restore. If the video output is cut while the
+# screen is on (e.g. both daemons were killed by hand), pressing the Magisk
+# action button restores the picture immediately.
+if [ -f "$LOGDIR/video_off" ]; then
+    log "action: cut marker present, forcing DP video output on"
+    [ -e /sys/kernel/debug/drm_dp/hpd ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    [ -e /sys/kernel/debug/drm_dp/hpd ] && echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
+    rm -f "$LOGDIR/video_off"
+    echo on > "$LOGDIR/video.state" 2>/dev/null
+    sleep 2
+    echo "已强制恢复视频输出（若外接屏仍无画面，请重新插拔一线通）。"
+fi
+
 # already running? -> just reopen the page (timer is NOT extended)
 if [ -f "$PIDFILE" ]; then
     pid=$(cat "$PIDFILE" 2>/dev/null)

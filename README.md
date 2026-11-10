@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.2.1-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.3.0-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
@@ -22,6 +22,23 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 | 4 | 从屏幕端拔插 PD 供电线后端口卡死 | 本次开机 DP 曾=1 && 现=0 && partner 在线/震荡 | v1.1.0 |
 
 平板单独使用（本次开机从未连接过屏幕）永不误触发；连接普通 PD 充电器、U 盘等 USB 配件不误触发。
+
+## 息屏自动切断视频输出（v1.3.0）
+
+反方向的省电能力：**按电源键息屏 → 立即停掉对外接屏的 DP 视频信号；亮屏 → 自动恢复**。
+实测切断约 1.1s、恢复约 1.1s，息屏期间触摸与供电不受影响。
+
+```
+息屏切换:  echo 0 > /sys/kernel/debug/drm_dp/hpd   # 连接器断开、链路拆除
+亮屏恢复:  echo 1 > /sys/kernel/debug/drm_dp/hpd   # 重新训练链路、画面回来
+检测:      logcat -b events -s screen_toggled  (事件驱动)
+           dumpsys power mWakefulness          (3~15s 轮询兜底)
+```
+
+为杜绝"永久黑屏"，设计了多层恢复：切换失败重试→自动停用并保持视频开启；双守护心跳互检与
+自动拉起；崩溃重启后按实际屏幕状态自对齐；恢复失败降级 `port_type` 重放；开机/卸载/安装
+均强制恢复视频；Magisk「执行」按钮可一键强制恢复。完整状态机与异常矩阵见
+[tab-dp-watchdog/README.md](tab-dp-watchdog/README.md#息屏切断视频输出v130)。
 
 ## 安装
 

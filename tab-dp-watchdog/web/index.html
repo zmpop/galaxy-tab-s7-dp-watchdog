@@ -117,6 +117,9 @@ function fetchStatus(){
     h+='&nbsp;&nbsp;目标触摸设备: '+(s.tp_online?'<span class="badge ok">在线</span>':'<span class="badge bad">离线</span>');
     h+='<br>守护进程: '+(s.daemon?'<span class="badge ok">运行中</span>':'<span class="badge bad">未运行</span>');
     h+='&nbsp;&nbsp;配置文件: '+(s.config?'已保存':'默认值');
+    var scrTxt=s.screen==='on'?'亮屏':(s.screen==='off'?'息屏':'未知');
+    h+='<br>屏幕: '+scrTxt+'&nbsp;&nbsp;视频输出: '+(s.video==='off'?'<span class="badge bad">已切断</span>':'<span class="badge ok">开启</span>');
+    h+='&nbsp;&nbsp;息屏切断: '+(s.video_switch?'<span class="badge ok">启用</span>':'<span class="badge bad">停用</span>');
     $('statusLine').innerHTML=h;
     if(typeof s.remain==='number'&&s.remain>=0){remain=s.remain}
   }).catch(function(){showClosed()});

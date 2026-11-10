@@ -20,9 +20,19 @@
 
 # 1) stop processes (defensive; reboot has normally already done this)
 pkill -f "modules/tab_dp_watchdog/service.sh" 2>/dev/null
+pkill -f "modules/tab_dp_watchdog/screenvid.sh" 2>/dev/null
 pkill -f "modules/tab_dp_watchdog/web/autoshut.sh" 2>/dev/null
 if [ -f /data/adb/tpdp/web.pid ]; then
     kill "$(cat /data/adb/tpdp/web.pid 2>/dev/null)" 2>/dev/null
+fi
+
+# 1b) restore DP video output: if the screen gate had cut the link when the
+#     module is removed, the external screen must not stay black.
+if [ ! -e /sys/kernel/debug/drm_dp/hpd ]; then
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null
+fi
+if [ -e /sys/kernel/debug/drm_dp/hpd ]; then
+    echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
 fi
 
 # 2) remove all module data outside the module directory

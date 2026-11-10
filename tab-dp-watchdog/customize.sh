@@ -29,3 +29,11 @@ if [ -d "$MODPATH/web" ]; then
   done
   [ -f "$MODPATH/web/autoshut.sh" ] && set_perm "$MODPATH/web/autoshut.sh" 0 0 0755
 fi
+
+# safety: never install over a state where a previous version left the DP
+# video output cut (the external screen would stay black after the reboot)
+if [ -e /sys/kernel/debug/drm_dp/hpd ]; then
+  echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
+  ui_print "- DP video output forced ON (install-time failsafe)"
+fi
+rm -f /data/adb/tpdp/video_off /data/adb/tpdp/video.disabled 2>/dev/null

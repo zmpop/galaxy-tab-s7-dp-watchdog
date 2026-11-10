@@ -24,6 +24,21 @@ done
 daemon=0
 pgrep -f 'modules/tab_dp_watchdog/service.sh' >/dev/null 2>&1 && daemon=1
 
+# screen gated video output (v1.3.0)
+vid=0
+pgrep -f 'modules/tab_dp_watchdog/screenvid.sh' >/dev/null 2>&1 && vid=1
+vstate=$(cat "$LOGDIR/video.state" 2>/dev/null)
+[ -n "$vstate" ] || vstate=on
+vswitch=1
+[ -f "$LOGDIR/video.disabled" ] && vswitch=0
+[ "$VIDEO_SWITCH" = "0" ] && vswitch=0
+scr=unknown
+w=$(dumpsys power 2>/dev/null | sed -n 's/.*mWakefulness=\([A-Za-z]*\).*/\1/p' | head -n 1)
+case "$w" in
+    Awake)         scr=on ;;
+    Asleep|Dozing) scr=off ;;
+esac
+
 remain=-1
 if [ -f "$LOGDIR/web.start" ]; then
     st=$(cat "$LOGDIR/web.start" 2>/dev/null)
@@ -35,5 +50,5 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d}\n' \
-    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain"
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d}\n' \
+    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch"
