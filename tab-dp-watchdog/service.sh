@@ -1,7 +1,12 @@
 #!/system/bin/sh
-# Tab S7 DP Link Watchdog v1.2.0 - service entry
+# Tab S7 DP Link Watchdog v1.3.1 - service entry
 # Runs as root (u:r:magisk:s0) at late_start service mode.
 #
+# v1.3.1: suspend-aware stale marker check. hb.video ages in wall-clock time
+#   while the tablet is suspended (Doze), which made the old check restore
+#   video every suspend cycle while the screen was off (night flood).
+#   Now the screen state (mWakefulness) is consulted first: asleep/dozing
+#   means "frozen, not dead" -> heartbeat self-healed, cut kept.
 # v1.2.0: config hot-reload. When /data/adb/tpdp/config changes
 #   (e.g. a device is saved from the web UI), the watchdog reloads
 #   TP_VID/TP_PID and poll parameters within one poll cycle.
@@ -153,7 +158,21 @@ while true; do
         if [ "$vage" -lt 120 ]; then
             continue
         fi
-        log "video_off marker stale (${vage}s) -> clearing, restoring video"
+        # v1.3.1: an old heartbeat is NOT proof the gatekeeper died. While the
+        # tablet is suspended the watchdog daemons are frozen too (shell sleep
+        # runs on monotonic time), so hb.video ages in wall-clock time on every
+        # Doze suspend/resume cycle. Only treat the marker as stale when the
+        # screen is actually awake; while asleep, self-heal the heartbeat and
+        # keep the video cut (that is the desired state with the screen off).
+        wakefulness=$(dumpsys power 2>/dev/null | sed -n 's/.*mWakefulness=\([A-Za-z]*\).*/\1/p' | head -n 1)
+        case "$wakefulness" in
+            Asleep|Dozing)
+                date +%s > "$LOGDIR/hb.video"
+                log "video_off marker kept: hb aged ${vage}s but screen ${wakefulness} (suspend freeze) - hb self-healed"
+                continue
+                ;;
+        esac
+        log "video_off marker stale (${vage}s, screen ${wakefulness:-unknown}) -> clearing, restoring video"
         rm -f "$LOGDIR/video_off"
         [ -e "$HPD_NODE" ] && echo 1 > "$HPD_NODE" 2>/dev/null
         continue
