@@ -5,19 +5,34 @@ echo ""
 
 LOGDIR=/data/adb/tpdp
 CFG=$LOGDIR/config
-TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300; LOCK60=1
+TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300; HZ_MODE=60
+PCLK_CAP_KHZ=300000; PCLK_120_KHZ=560000
 [ -f "$CFG" ] && . "$CFG" 2>/dev/null
-: ${LOCK60:=1}
+# validate HZ_MODE; map legacy LOCK60 (v1.3.2) when no HZ_MODE key exists
+case "$HZ_MODE" in
+    60|120|auto) ;;
+    *) HZ_MODE=60 ;;
+esac
+if [ -f "$CFG" ] && ! grep -q '^HZ_MODE=' "$CFG"; then
+    [ "${LOCK60:-1}" = "0" ] && HZ_MODE=auto
+fi
 
-# 60Hz lock state (v1.3.2)
+# refresh rate state (v1.3.3)
 hz=unknown
 hz_line=$(sed -n 's/^[[:space:]]*resolution=//p' /sys/kernel/debug/drm_dp/dp_debug 2>/dev/null | head -n 1)
 [ -n "$hz_line" ] && hz=$hz_line
-lock_applied=0
+hz_applied=0
 cur_cap=$(sed -n 's/^max_pclk_khz = \([0-9]\{1,\}\),.*/\1/p' /sys/kernel/debug/drm_dp/max_pclk_khz 2>/dev/null)
-case "$cur_cap" in
-    300000) lock_applied=1 ;;
+want_cap=""
+case "$HZ_MODE" in
+    60)  want_cap=$PCLK_CAP_KHZ ;;
+    120) want_cap=$PCLK_120_KHZ ;;
+    auto)
+        want_cap=$(cat "$LOGDIR/pclk_org" 2>/dev/null)
+        [ -n "$want_cap" ] || want_cap=675000
+        ;;
 esac
+[ -n "$cur_cap" ] && [ "$cur_cap" = "$want_cap" ] && hz_applied=1
 
 dp=0
 grep -q 'DP=1' /sys/class/extcon/extcon0/state 2>/dev/null && dp=1
@@ -61,5 +76,5 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"lock60":%s,"lock_applied":%d,"hz":"%s"}\n' \
-    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$LOCK60" "$lock_applied" "$hz"
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s"}\n' \
+    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$HZ_MODE" "$hz_applied" "$hz"

@@ -1,7 +1,13 @@
 #!/system/bin/sh
-# Tab S7 DP Link Watchdog v1.3.2 - service entry
+# Tab S7 DP Link Watchdog v1.3.3 - service entry
 # Runs as root (u:r:magisk:s0) at late_start service mode.
 #
+# v1.3.3: external display refresh rate selector. The 60Hz on/off lock was
+#   upgraded to a three-way choice (60 / 120 / auto) driven by HZ_MODE:
+#     60   -> pixel clock capped at PCLK_CAP_KHZ  (default 300000)
+#     120  -> pixel clock capped at PCLK_120_KHZ  (default 560000)
+#     auto -> kernel default limit restored (no filtering)
+#   Legacy LOCK60 configs keep working (LOCK60=1 -> 60, LOCK60=0 -> auto).
 # v1.3.2: 60Hz lock. Caps the DP pixel clock (debugfs max_pclk_khz) so the
 #   framework cannot pick high-bandwidth modes (e.g. 2560x1600@120Hz needs
 #   a 537MHz pixel clock, 60Hz only 268MHz). Halving the link load fixes
@@ -39,11 +45,20 @@ STRIKES=2              # consecutive fault polls before action (debounce)
 MAX_RETRY=5            # recovery attempts per fault episode
 BOOT_DELAY=20          # seconds to wait after service start
 VIDEO_SWITCH=1         # 1 = cut DP video while the screen is off (screenvid)
-LOCK60=1               # 1 = cap DP pixel clock (forces 60Hz-class modes)
-PCLK_CAP_KHZ=300000    # pixel clock cap; 120Hz mode needs 537MHz, 60Hz 268MHz
+HZ_MODE=60             # external display refresh cap: 60 | 120 | auto
+PCLK_CAP_KHZ=300000    # 60Hz-class pixel clock cap; 60Hz mode needs 268MHz
+PCLK_120_KHZ=560000    # 120Hz-class pixel clock cap; 120Hz mode needs 537MHz
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
+# validate HZ_MODE; map legacy LOCK60 (v1.3.2) when no HZ_MODE key exists
+case "$HZ_MODE" in
+    60|120|auto) ;;
+    *) HZ_MODE=60 ;;
+esac
+if [ -f "$LOGDIR/config" ] && ! grep -q '^HZ_MODE=' "$LOGDIR/config"; then
+    [ "${LOCK60:-1}" = "0" ] && HZ_MODE=auto
+fi
 
 cfg_mtime=0
 [ -f "$LOGDIR/config" ] && cfg_mtime=$(date -r "$LOGDIR/config" +%s 2>/dev/null || echo 0)
@@ -57,13 +72,18 @@ log() {
 # ---------- screen gated video output (v1.3.0) ----------
 HPD_NODE=/sys/kernel/debug/drm_dp/hpd
 
-# ---------- 60Hz lock (v1.3.2) ----------
+# ---------- refresh rate selector (v1.3.3) ----------
 PCLK_NODE=/sys/kernel/debug/drm_dp/max_pclk_khz
 DPDEBUG_NODE=/sys/kernel/debug/drm_dp/dp_debug
 
 dp_hz() {
     # current DP timing, e.g. "2560x1600@120Hz" (lines carry leading blanks)
     sed -n 's/^[[:space:]]*resolution=//p' "$DPDEBUG_NODE" 2>/dev/null | head -n 1
+}
+
+dp_hz_num() {
+    # numeric refresh of the current timing, e.g. "120"; empty if unknown
+    dp_hz | sed -n 's/.*@\([0-9]\{1,\}\)Hz.*/\1/p' | head -n 1
 }
 
 pclk_org() {
@@ -76,43 +96,57 @@ pclk_org() {
     fi
 }
 
-apply_hz_lock() {
-    # $1: 1 = enforce the cap, 0 = restore the original limit
+hz_cap_for() {
+    # pixel clock cap (kHz) for a refresh mode: 60 | 120 | auto
+    case "$1" in
+        60)  echo "$PCLK_CAP_KHZ" ;;
+        120) echo "$PCLK_120_KHZ" ;;
+        *)   pclk_org ;;
+    esac
+}
+
+apply_hz_mode() {
+    # $1: 60|120|auto. Writes the corresponding pixel clock cap.
+    # Idempotent; does NOT force a mode switch by itself.
     [ -e "$PCLK_NODE" ] || return 1
-    local v
-    if [ "$1" = "1" ]; then
-        v=$(pclk_org)
+    local cap v
+    cap=$(hz_cap_for "$1")
+    [ -n "$cap" ] && [ "$cap" -gt 0 ] 2>/dev/null || cap=675000
+    if [ ! -s "$LOGDIR/pclk_org" ]; then
+        v=$(sed -n 's/.*org: \([0-9]\{1,\}\).*/\1/p' "$PCLK_NODE" 2>/dev/null)
         [ -n "$v" ] && [ "$v" -gt 0 ] 2>/dev/null && echo "$v" > "$LOGDIR/pclk_org"
-        echo "$PCLK_CAP_KHZ" > "$PCLK_NODE" 2>/dev/null || return 1
-    else
-        v=$(pclk_org)
-        [ -n "$v" ] || v=675000
-        echo "$v" > "$PCLK_NODE" 2>/dev/null || return 1
     fi
+    echo "$cap" > "$PCLK_NODE" 2>/dev/null || return 1
     return 0
 }
 
-hz_lock_boot() {
-    # Apply the cap early; if the link already enumerated at a high mode
-    # (cold boot with cable attached happens before late_start services),
-    # re-enumerate once so the framework re-picks a mode within the cap.
-    [ "$LOCK60" = "1" ] || { lock_applied=0; return 0; }
-    lock_applied=1
-    if apply_hz_lock 1; then
-        log "hz lock: DP pixel clock capped at ${PCLK_CAP_KHZ}kHz"
+hz_reevaluate() {
+    # Re-enumerate the DP link once so the framework re-picks a mode within
+    # the current cap. Only called when the live timing exceeds the target.
+    echo 0 > "$HPD_NODE" 2>/dev/null
+    sleep 2
+    echo 1 > "$HPD_NODE" 2>/dev/null
+}
+
+hz_boot() {
+    # Apply the refresh cap early. If the link already enumerated above the
+    # target (cold boot with cable attached happens before late_start
+    # services), re-enumerate once so a compliant mode gets picked.
+    hz_applied=$HZ_MODE
+    [ "$HZ_MODE" = "auto" ] && return 0
+    if apply_hz_mode "$HZ_MODE"; then
+        log "hz mode: $HZ_MODE -> DP pixel clock capped at $(hz_cap_for "$HZ_MODE")kHz"
         if dp_up; then
-            case "$(dp_hz)" in
-                *120Hz*)
-                    log "hz lock: link came up at $(dp_hz) -> forcing re-enumeration"
-                    echo 0 > "$HPD_NODE" 2>/dev/null
-                    sleep 2
-                    echo 1 > "$HPD_NODE" 2>/dev/null
-                    ;;
-            esac
+            cur=$(dp_hz_num)
+            limit=$HZ_MODE
+            if [ -n "$cur" ] && [ "$cur" -gt "$limit" ] 2>/dev/null; then
+                log "hz mode: link came up at $(dp_hz) (> ${limit}Hz) -> forcing re-enumeration"
+                hz_reevaluate
+            fi
         fi
     else
-        log "hz lock: $PCLK_NODE not writable, feature unavailable"
-        lock_applied=0
+        log "hz mode: $PCLK_NODE not writable, feature unavailable"
+        hz_applied=none
     fi
 }
 # -------------------------------------------------------
@@ -189,9 +223,9 @@ virtual_replug() {
 
 MODVER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
 [ -n "$MODVER" ] || MODVER=unknown
-log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, lock60=${LOCK60}) ====="
+log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, hz=${HZ_MODE}) ====="
 boot_video_failsafe
-hz_lock_boot
+hz_boot
 start_screenvid
 sleep "$BOOT_DELAY"
 
@@ -212,18 +246,20 @@ while true; do
         if [ "$mt" != "$cfg_mtime" ]; then
             cfg_mtime=$mt
             . "$LOGDIR/config" 2>/dev/null
-            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s lock60=$LOCK60"
+            case "$HZ_MODE" in
+                60|120|auto) ;;
+                *) HZ_MODE=60 ;;
+            esac
+            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s hz=$HZ_MODE"
             strike=0
-            # reconcile the 60Hz lock with the kernel. The web CGI applies
+            # reconcile the refresh cap with the kernel. The web CGI applies
             # the cap AND the re-enumeration itself before saving the config,
             # so this only needs to mirror manual config edits: the kernel
             # write is idempotent, no mode switch is forced here.
-            if [ "$LOCK60" = "1" ] && [ "$lock_applied" != "1" ]; then
-                lock_applied=1
-                apply_hz_lock 1 && log "hz lock: enabled (cap ${PCLK_CAP_KHZ}kHz)"
-            elif [ "$LOCK60" != "1" ] && [ "$lock_applied" = "1" ]; then
-                lock_applied=0
-                apply_hz_lock 0 && log "hz lock: disabled (pixel clock limit restored)"
+            if [ "$HZ_MODE" != "$hz_applied" ]; then
+                hz_applied=$HZ_MODE
+                apply_hz_mode "$HZ_MODE" && \
+                    log "hz mode: $HZ_MODE (cap $(hz_cap_for "$HZ_MODE")kHz)"
             fi
         fi
     fi

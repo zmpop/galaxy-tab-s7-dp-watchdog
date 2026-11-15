@@ -37,16 +37,14 @@ h1{font-size:18px}
 #toast.show{opacity:.95}
 #closed{position:fixed;inset:0;background:rgba(245,246,248,.97);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;text-align:center;padding:20px;z-index:99}
 #closed .big{font-size:16px;font-weight:600}
-.hzrow{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.hzlabel{flex:1;min-width:0}
-.hzstate{font-size:12px;color:var(--sub);margin-top:4px;font-family:ui-monospace,monospace}
-.switch{position:relative;display:inline-block;width:52px;height:30px;flex:none}
-.switch input{opacity:0;width:0;height:0}
-.switch .slider{position:absolute;inset:0;background:#cdd4dc;border-radius:30px;transition:background .2s;cursor:pointer}
-.switch .slider:before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;background:#fff;border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
-.switch input:checked + .slider{background:var(--acc)}
-.switch input:checked + .slider:before{transform:translateX(22px)}
-.switch input:disabled + .slider{opacity:.5;cursor:default}
+.hzopts{display:flex;gap:8px;margin-top:4px}
+.hzbtn{flex:1;border:1px solid var(--line);border-radius:10px;background:var(--card);padding:10px 6px;text-align:center;cursor:pointer;transition:background .15s,border-color .15s}
+.hzbtn .v{font-size:15px;font-weight:600;color:var(--tx)}
+.hzbtn .d{font-size:11px;color:var(--sub);margin-top:3px}
+.hzbtn.sel{border-color:var(--acc);background:#f0f5ff}
+.hzbtn.sel .v{color:var(--acc)}
+.hzbtn:disabled{opacity:.5;cursor:default}
+.hzstate{font-size:12px;color:var(--sub);margin-top:8px;font-family:ui-monospace,monospace}
 </style>
 </head>
 <body>
@@ -62,14 +60,13 @@ h1{font-size:18px}
 
 <div class="card">
   <h2>外接屏刷新率</h2>
-  <p class="hint">锁定 60Hz：限制 DP 像素时钟上限，过滤 120Hz 等高带宽模式，链路带宽需求减半，可消除信号临界导致的黑屏瞬断与息屏自亮。切换时外接屏会黑屏约 3 秒，属正常现象。</p>
-  <div class="hzrow">
-    <div class="hzlabel">
-      <div>锁定 60Hz <span class="badge ok">推荐 · 稳定优先</span></div>
-      <div id="hzState" class="hzstate">当前模式: 读取中…</div>
-    </div>
-    <label class="switch"><input type="checkbox" id="hzSwitch"><span class="slider"></span></label>
+  <p class="hint">通过限制 DP 像素时钟上限控制可选显示模式。<b>60Hz 为默认推荐档</b>：链路带宽需求减半，可消除信号临界导致的黑屏瞬断与息屏自亮；120Hz 流畅度优先，链路压力最大；自动 = 不限制，采用屏幕默认最高模式。切换时外接屏会黑屏约 3 秒，属正常现象。</p>
+  <div class="hzopts">
+    <button class="hzbtn" data-mode="60" type="button"><span class="v">60Hz</span><span class="d">推荐 · 稳定</span></button>
+    <button class="hzbtn" data-mode="120" type="button"><span class="v">120Hz</span><span class="d">流畅 · 高带宽</span></button>
+    <button class="hzbtn" data-mode="auto" type="button"><span class="v">自动</span><span class="d">不限速</span></button>
   </div>
+  <div id="hzState" class="hzstate">当前模式: 读取中…</div>
 </div>
 
 <div class="card">
@@ -144,11 +141,13 @@ function fetchStatus(){
     h+='&nbsp;&nbsp;息屏切断: '+(s.video_switch?'<span class="badge ok">启用</span>':'<span class="badge bad">停用</span>');
     $('statusLine').innerHTML=h;
     var hzTxt=(s.hz&&s.hz!=='unknown')?s.hz:'未知';
-    $('hzState').textContent='当前模式: '+hzTxt+(s.lock_applied?'（已限速）':'');
+    $('hzState').textContent='当前模式: '+hzTxt;
     if(!hzBusy){
-      var sw=$('hzSwitch');
-      var want=(s.lock60===1||s.lock60==='1');
-      if(sw.checked!==want){sw.checked=want}
+      var cur=s.hz_mode||'60';
+      var bs=document.querySelectorAll('.hzbtn');
+      for(var i=0;i<bs.length;i++){
+        bs[i].classList.toggle('sel',bs[i].getAttribute('data-mode')===cur);
+      }
     }
     if(typeof s.remain==='number'&&s.remain>=0){remain=s.remain}
   }).catch(function(){showClosed()});
@@ -182,28 +181,38 @@ function loadDevs(mode){
    .catch(function(){$('listHint').textContent='获取失败：服务可能已关闭。';showClosed()});
 }
 
-$('hzSwitch').addEventListener('change',function(){
-  if(closed||hzBusy){this.checked=!this.checked;return}
-  hzBusy=true;
-  var sw=this, want=sw.checked?1:0;
-  sw.disabled=true;
-  $('hzState').textContent='切换中…外接屏将短暂黑屏';
-  fetch('cgi-bin/hz',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'lock='+want})
-   .then(function(r){return r.json()})
-   .then(function(res){
-     if(res.ok){
-       sw.checked=(want===1);
-       $('hzState').textContent='当前模式: '+((res.hz&&res.hz!=='unknown')?res.hz:'未知')+(want===1?'（已限速）':'');
-       toast(res.msg||'已切换',4500);
-     }else{
-       sw.checked=(want!==1);
-       toast(res.msg||'切换失败',6000);
-       $('hzState').textContent='切换失败';
-     }
-   })
-   .catch(function(){sw.checked=(want!==1);$('hzState').textContent='请求失败';toast('请求失败：服务可能已关闭',5000);showClosed()})
-   .then(function(){hzBusy=false;sw.disabled=false;fetchStatus()});
-});
+var hzButtons=document.querySelectorAll('.hzbtn');
+for(var hi=0;hi<hzButtons.length;hi++){
+  (function(btn){
+    btn.addEventListener('click',function(){
+      if(closed||hzBusy)return;
+      var mode=btn.getAttribute('data-mode');
+      if(btn.classList.contains('sel'))return;
+      hzBusy=true;
+      var bs=document.querySelectorAll('.hzbtn');
+      for(var i=0;i<bs.length;i++){bs[i].disabled=true}
+      $('hzState').textContent='切换中…外接屏将短暂黑屏';
+      fetch('cgi-bin/hz',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mode='+mode})
+       .then(function(r){return r.json()})
+       .then(function(res){
+         if(res.ok){
+           for(var i=0;i<bs.length;i++){bs[i].classList.toggle('sel',bs[i].getAttribute('data-mode')===mode)}
+           $('hzState').textContent='当前模式: '+((res.hz&&res.hz!=='unknown')?res.hz:'未知');
+           toast(res.msg||'已切换',4500);
+         }else{
+           $('hzState').textContent='切换失败';
+           toast(res.msg||'切换失败',6000);
+         }
+       })
+       .catch(function(){$('hzState').textContent='请求失败';toast('请求失败：服务可能已关闭',5000);showClosed()})
+       .then(function(){
+         hzBusy=false;
+         for(var i=0;i<bs.length;i++){bs[i].disabled=false}
+         fetchStatus();
+       });
+    });
+  })(hzButtons[hi]);
+}
 
 $('btnAuto').addEventListener('click',function(){loadDevs('auto')});
 $('btnAll').addEventListener('click',function(){loadDevs('all')});

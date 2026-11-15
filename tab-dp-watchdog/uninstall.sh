@@ -35,8 +35,8 @@ if [ -e /sys/kernel/debug/drm_dp/hpd ]; then
     echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
 fi
 
-# 1c) restore the DP pixel clock limit if the 60Hz lock had capped it,
-#     so high-bandwidth modes (120Hz) become selectable again after removal.
+# 1c) restore the DP pixel clock limit if the refresh selector had capped
+#     it, so high-bandwidth modes (120Hz) become selectable again after removal.
 if [ -f /data/adb/tpdp/pclk_org ] && [ -e /sys/kernel/debug/drm_dp/max_pclk_khz ]; then
     echo "$(cat /data/adb/tpdp/pclk_org 2>/dev/null)" > /sys/kernel/debug/drm_dp/max_pclk_khz 2>/dev/null
 fi
