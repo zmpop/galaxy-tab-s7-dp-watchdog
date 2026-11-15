@@ -5,8 +5,19 @@ echo ""
 
 LOGDIR=/data/adb/tpdp
 CFG=$LOGDIR/config
-TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300
+TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300; LOCK60=1
 [ -f "$CFG" ] && . "$CFG" 2>/dev/null
+: ${LOCK60:=1}
+
+# 60Hz lock state (v1.3.2)
+hz=unknown
+hz_line=$(sed -n 's/^[[:space:]]*resolution=//p' /sys/kernel/debug/drm_dp/dp_debug 2>/dev/null | head -n 1)
+[ -n "$hz_line" ] && hz=$hz_line
+lock_applied=0
+cur_cap=$(sed -n 's/^max_pclk_khz = \([0-9]\{1,\}\),.*/\1/p' /sys/kernel/debug/drm_dp/max_pclk_khz 2>/dev/null)
+case "$cur_cap" in
+    300000) lock_applied=1 ;;
+esac
 
 dp=0
 grep -q 'DP=1' /sys/class/extcon/extcon0/state 2>/dev/null && dp=1
@@ -50,5 +61,5 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d}\n' \
-    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch"
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"lock60":%s,"lock_applied":%d,"hz":"%s"}\n' \
+    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$LOCK60" "$lock_applied" "$hz"

@@ -1,0 +1,95 @@
+#!/system/bin/sh
+# CGI: toggle the 60Hz lock (POST lock=1|0).
+# 1. writes LOCK60 into the config (daemon hot-reloads it, idempotent here)
+# 2. applies / restores the DP pixel clock cap in the kernel
+# 3. if the DP link is up, re-enumerates it once so the framework re-picks
+#    a mode within the new limit (external screen blacks out ~3s - normal)
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+PCLK_NODE=/sys/kernel/debug/drm_dp/max_pclk_khz
+HPD_NODE=/sys/kernel/debug/drm_dp/hpd
+DPDEBUG_NODE=/sys/kernel/debug/drm_dp/dp_debug
+EXTCON_STATE=/sys/class/extcon/extcon0/state
+LOCK60=1; PCLK_CAP_KHZ=300000
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+: ${LOCK60:=1}
+: ${PCLK_CAP_KHZ:=300000}
+mkdir -p "$LOGDIR"
+
+body=""
+if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ]; then
+    body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+lock=$(printf '%s' "$body" | sed -n 's/.*lock=\([01]\).*/\1/p')
+if [ -z "$lock" ]; then
+    printf '{"ok":false,"msg":"参数无效：需要 lock=1 或 lock=0"}'
+    exit 0
+fi
+
+[ -e "$HPD_NODE" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+if [ ! -e "$PCLK_NODE" ]; then
+    printf '{"ok":false,"msg":"内核不支持像素时钟限制节点，无法切换"}'
+    exit 0
+fi
+
+# remember the kernel default limit before the first cap
+if [ ! -s "$LOGDIR/pclk_org" ]; then
+    org=$(sed -n 's/.*org: \([0-9]\{1,\}\).*/\1/p' "$PCLK_NODE" 2>/dev/null)
+    [ -n "$org" ] && [ "$org" -gt 0 ] 2>/dev/null && echo "$org" > "$LOGDIR/pclk_org"
+fi
+
+dp_up=0
+grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null && dp_up=1
+
+hz_before=$(sed -n 's/^[[:space:]]*resolution=//p' "$DPDEBUG_NODE" 2>/dev/null | head -n 1)
+
+# 1) kernel cap
+if [ "$lock" = "1" ]; then
+    echo "$PCLK_CAP_KHZ" > "$PCLK_NODE" 2>/dev/null || {
+        printf '{"ok":false,"msg":"写入像素时钟上限失败"}'
+        exit 0
+    }
+else
+    org=$(cat "$LOGDIR/pclk_org" 2>/dev/null)
+    [ -n "$org" ] || org=675000
+    echo "$org" > "$PCLK_NODE" 2>/dev/null || {
+        printf '{"ok":false,"msg":"恢复像素时钟上限失败"}'
+        exit 0
+    }
+fi
+
+# 2) persist config (keep other keys, replace/append LOCK60)
+touch "$CFG"
+sed -i '/^LOCK60=/d' "$CFG" 2>/dev/null
+printf 'LOCK60=%s\n' "$lock" >> "$CFG"
+
+# 3) re-enumerate so the framework re-picks a mode within the new limit
+note=""
+if [ "$dp_up" = "1" ]; then
+    echo 0 > "$HPD_NODE" 2>/dev/null
+    sleep 2
+    echo 1 > "$HPD_NODE" 2>/dev/null
+    i=0
+    while [ $i -lt 12 ]; do
+        grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null && break
+        sleep 1
+        i=$((i + 1))
+    done
+else
+    note="（DP 链路当前未连接，将在下次连接时生效）"
+fi
+
+hz_after=$(sed -n 's/^[[:space:]]*resolution=//p' "$DPDEBUG_NODE" 2>/dev/null | head -n 1)
+[ -n "$hz_after" ] || hz_after=unknown
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: 60Hz lock -> $lock (${hz_before:-unknown} -> $hz_after)" >> "$LOGDIR/log"
+
+if [ "$lock" = "1" ]; then
+    msg="已锁定 60Hz，当前模式 ${hz_after}${note}"
+else
+    msg="已恢复自动模式，当前模式 ${hz_after}${note}"
+fi
+printf '{"ok":true,"lock":%s,"hz":"%s","msg":"%s"}' "$lock" "$hz_after" "$msg"
