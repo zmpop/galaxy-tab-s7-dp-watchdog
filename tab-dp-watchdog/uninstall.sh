@@ -21,6 +21,7 @@
 # 1) stop processes (defensive; reboot has normally already done this)
 pkill -f "modules/tab_dp_watchdog/service.sh" 2>/dev/null
 pkill -f "modules/tab_dp_watchdog/screenvid.sh" 2>/dev/null
+pkill -f "modules/tab_dp_watchdog/wakegate.sh" 2>/dev/null
 pkill -f "modules/tab_dp_watchdog/web/autoshut.sh" 2>/dev/null
 if [ -f /data/adb/tpdp/web.pid ]; then
     kill "$(cat /data/adb/tpdp/web.pid 2>/dev/null)" 2>/dev/null

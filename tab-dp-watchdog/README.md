@@ -26,7 +26,7 @@ Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的三类"黑屏"问题:
 
 ## 安装
 
-Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.2.0.zip → 重启。
+Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.4.0.zip → 重启。
 
 ## USB 设备选择界面(v1.2.0)
 
@@ -80,6 +80,50 @@ Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.2.0.zip 
 **已知副作用**:切断/恢复在系统层等效于"外接屏被拔出/接入",因此息屏期间窗口会回流到
 平板屏,亮屏后外接屏会重新枚举一次(窗口布局可能重排)。这是 HPD 方案的固有特性。
 
+## 亮屏来源控制与息屏超时强制执行(v1.4.0)
+
+接外接屏时,三星 `system_server` 会长期持有 `DisplayDeviceRepository.mHDMIWakeLock`
+(等级 `SCREEN_DIM_WAKE_LOCK`,`ACQUIRE_CAUSES_WAKEUP`)。由此产生两个现象:
+
+1. **自己亮屏**:充电状态跳变(`powered change (plugged_in)`)、网络/定时唤醒,
+   以及该唤醒锁自身的 `ACQUIRE_CAUSES_WAKEUP`,都会把屏幕点亮;
+2. **30 秒息屏不生效**:`SCREEN_DIM_WAKE_LOCK` 在系统语义上**禁止屏幕熄灭**
+   (只允许变暗),所以 `mScreenOffTimeoutSetting=30000` 到点也不会黑屏,
+   实测可连续亮 5 小时(02:11 持有 → 07:15 拔线才释放)。
+
+两者都无法在应用层修改 PowerManager,因此由 `wakegate.sh` 在系统之上接管:
+
+- **唤醒闸门**:屏幕点亮后 1 秒内判定是否为用户操作,不是则立刻发
+  `KEYCODE_SLEEP`(等效按一下电源键,可突破唤醒锁)按灭;
+- **超时强制执行**:用 `mLastUserActivityTime` 判断真实空闲时长,超过系统设定
+  的自动息屏时间(默认 30s,+2s 容差)即强制休眠。
+
+**判定依据**(本机实测):
+
+| 信号 | 说明 |
+|---|---|
+| 电源键 | `logcat -b main` 中 `interceptKeyTq keycode=26`(5 秒内) |
+| 触摸/输入 | `mLastUserActivityTime` 与 `mLastWakeTime` 差值在 ±1.5s 内;辅以 `dumpsys input` 的 `MotionEvent age` |
+| 其他事件 | 唤醒时两者差值远离(如充电跳变时为负、熄屏前按键后为正)→ 判为非用户唤醒 |
+| 排除项 | `/sys/class/sec/sec_key/key_pressed_count` 的 `KPWR` 恒为 0,不可用;`getevent` 读不到事件(`sec_key_notifier` 提前消费) |
+
+**两个开关的联动关系**:
+
+| 主开关(仅触摸/电源键亮屏) | 子开关(允许点击触摸屏唤醒) | 实际效果 |
+|---|---|---|
+| 开 | 开 | 触摸点击、电源键都能点亮 |
+| 开 | 关 | **只有电源键**能点亮,触摸唤醒会被按灭 |
+| 关 | 任意 | 不限制亮屏来源(子开关置灰,不生效) |
+
+保存逻辑:子开关取值**始终写入配置**(主开关关闭时也保存),只是不生效;
+重新打开主开关即恢复用户上次的选择。三个开关一次性 POST 到 `cgi-bin/wake`,
+配置以"临时文件 + mv"原子替换,守护进程 1 秒内热加载,无需重启。
+
+**失效保护**:5 分钟内抑制超过 8 次,说明判定依据不可靠,闸门自动暂停 10 分钟
+(避免把用户锁在熄屏状态);每次判定都会在日志里留下证据快照。
+开启"强制息屏超时"时,若检测到前台应用持有 `SCREEN_BRIGHT_WAKE_LOCK`
+(如全屏播放视频)则**不**强制休眠。
+
 ## 配置(可选)
 
 复制并编辑 `/data/adb/tpdp/config`:
@@ -96,6 +140,9 @@ VIDEO_SWITCH=1         # 1=息屏切断视频输出, 0=关闭该功能
 POLL_TICKS_ON=15       # 亮屏态: 每多少秒用 dumpsys 兜底校验一次
 POLL_TICKS_OFF=3       # 息屏态: 每多少秒兜底校验一次(越小唤醒恢复越快)
 VIDEO_MAX_FAIL=5       # 切断连续失败多少次后自动停用该功能(保持视频开启)
+WAKE_GATE=1            # 1=仅触摸/电源键可亮屏, 0=不限制亮屏来源
+WAKE_GATE_TOUCH=1      # 1=允许触摸点击唤醒(仅 WAKE_GATE=1 时生效)
+TIMEOUT_ENFORCE=1      # 1=系统自动息屏被唤醒锁屏蔽时强制休眠
 ```
 
 配置文件被修改(含从 Web 界面保存)后,守护进程会在一个轮询周期内自动重新加载。

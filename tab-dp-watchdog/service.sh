@@ -1,7 +1,11 @@
 #!/system/bin/sh
-# Tab S7 DP Link Watchdog v1.3.3 - service entry
+# Tab S7 DP Link Watchdog v1.4.0 - service entry
 # Runs as root (u:r:magisk:s0) at late_start service mode.
 #
+# v1.4.0: screen wake gate + screen-off timeout enforcer (wakegate.sh).
+#   Keeps the tablet from lighting up on non user events and from staying lit
+#   when the framework timeout is blocked by Samsung's HDMI wake lock.
+#   Controlled by WAKE_GATE / WAKE_GATE_TOUCH / TIMEOUT_ENFORCE (web UI).
 # v1.3.3: external display refresh rate selector. The 60Hz on/off lock was
 #   upgraded to a three-way choice (60 / 120 / auto) driven by HZ_MODE:
 #     60   -> pixel clock capped at PCLK_CAP_KHZ  (default 300000)
@@ -48,6 +52,9 @@ VIDEO_SWITCH=1         # 1 = cut DP video while the screen is off (screenvid)
 HZ_MODE=60             # external display refresh cap: 60 | 120 | auto
 PCLK_CAP_KHZ=300000    # 60Hz-class pixel clock cap; 60Hz mode needs 268MHz
 PCLK_120_KHZ=560000    # 120Hz-class pixel clock cap; 120Hz mode needs 537MHz
+WAKE_GATE=1            # 1 = only touchscreen tap / power key may light the screen
+WAKE_GATE_TOUCH=1      # 1 = touchscreen tap is allowed to wake (needs WAKE_GATE=1)
+TIMEOUT_ENFORCE=1      # 1 = force the system screen-off timeout to take effect
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
@@ -162,6 +169,15 @@ start_screenvid() {
     nohup sh "$MODDIR/screenvid.sh" >/dev/null 2>&1 &
 }
 
+# Start wakegate (v1.4.0) if it is not running: screen wake gate + screen-off
+# timeout enforcer. Independent of VIDEO_SWITCH - it only needs PowerManager.
+start_wakegate() {
+    [ -f "$MODDIR/wakegate.sh" ] || return 0
+    pgrep -f 'modules/tab_dp_watchdog/wakegate[.]sh' >/dev/null 2>&1 && return 0
+    log "wakegate not running -> starting it"
+    nohup sh "$MODDIR/wakegate.sh" >/dev/null 2>&1 &
+}
+
 # At boot, never leave the external screen black because a previous session
 # died while the video output was cut: clear the marker and, if a partner is
 # attached while the connector is off, force HPD high.
@@ -223,10 +239,11 @@ virtual_replug() {
 
 MODVER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
 [ -n "$MODVER" ] || MODVER=unknown
-log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, hz=${HZ_MODE}) ====="
+log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, hz=${HZ_MODE}, wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH}, timeout_enforce=${TIMEOUT_ENFORCE}) ====="
 boot_video_failsafe
 hz_boot
 start_screenvid
+start_wakegate
 sleep "$BOOT_DELAY"
 
 strike=0
@@ -239,6 +256,7 @@ while true; do
     # heartbeat for the mutual supervision with screenvid
     date +%s > "$LOGDIR/hb.main"
     start_screenvid
+    start_wakegate
 
     # hot-reload config if it changed (e.g. saved from the web UI)
     if [ -f "$LOGDIR/config" ]; then
@@ -250,7 +268,7 @@ while true; do
                 60|120|auto) ;;
                 *) HZ_MODE=60 ;;
             esac
-            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s hz=$HZ_MODE"
+            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s hz=$HZ_MODE wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH} timeout_enforce=${TIMEOUT_ENFORCE}"
             strike=0
             # reconcile the refresh cap with the kernel. The web CGI applies
             # the cap AND the re-enumeration itself before saving the config,

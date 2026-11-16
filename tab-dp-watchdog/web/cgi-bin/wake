@@ -1,0 +1,94 @@
+#!/system/bin/sh
+# CGI: screen wake control (v1.4.0).
+#
+# POST body: gate=0|1 & touch=0|1 & enforce=0|1   (any subset)
+#   gate    : WAKE_GATE        - only touchscreen tap / power key may wake
+#   touch   : WAKE_GATE_TOUCH  - touchscreen tap may wake (needs gate=1)
+#   enforce : TIMEOUT_ENFORCE  - force the system screen-off timeout to apply
+#
+# The config file is rewritten atomically (tmp + mv) so the daemons that
+# source it (service.sh / screenvid.sh / wakegate.sh) never read a half
+# written file. touch(1) is used to bump mtime, which is what every daemon
+# watches for hot-reload; wakegate re-reads within one second.
+#
+# Linkage is stored, not flattened: when gate=0 the touch value is still
+# persisted (so switching the gate back on restores the user's last choice),
+# but "touch_effective" reports 0 because it cannot apply.
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+mkdir -p "$LOGDIR"
+WAKE_GATE=1; WAKE_GATE_TOUCH=1; TIMEOUT_ENFORCE=1
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+for v in WAKE_GATE WAKE_GATE_TOUCH TIMEOUT_ENFORCE; do
+    eval "val=\$$v"
+    case "$val" in 0|1) ;; *) eval "$v=1" ;; esac
+done
+
+body=""
+if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ]; then
+    body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+
+getf() {
+    printf '%s' "$body" | sed -n "s/.*$1=\([^&]*\).*/\1/p" | head -n 1
+}
+
+g=$(getf gate)
+t=$(getf touch)
+e=$(getf enforce)
+changed=0
+
+if [ -n "$g" ]; then
+    case "$g" in 0|1) WAKE_GATE=$g; changed=1 ;; *) printf '{"ok":false,"msg":"gate 参数无效（需要 0 或 1）"}'; exit 0 ;; esac
+fi
+if [ -n "$t" ]; then
+    case "$t" in 0|1) WAKE_GATE_TOUCH=$t; changed=1 ;; *) printf '{"ok":false,"msg":"touch 参数无效（需要 0 或 1）"}'; exit 0 ;; esac
+fi
+if [ -n "$e" ]; then
+    case "$e" in 0|1) TIMEOUT_ENFORCE=$e; changed=1 ;; *) printf '{"ok":false,"msg":"enforce 参数无效（需要 0 或 1）"}'; exit 0 ;; esac
+fi
+if [ "$changed" = "0" ]; then
+    printf '{"ok":false,"msg":"没有可保存的参数（gate / touch / enforce）"}'
+    exit 0
+fi
+
+# atomic rewrite: drop our keys, re-append, rename over the original
+touch "$CFG" 2>/dev/null
+tmp="$CFG.tmp"
+if [ -f "$CFG" ]; then
+    grep -v -E '^(WAKE_GATE|WAKE_GATE_TOUCH|TIMEOUT_ENFORCE)=' "$CFG" > "$tmp" 2>/dev/null
+else
+    : > "$tmp"
+fi
+{
+    printf 'WAKE_GATE=%s\n' "$WAKE_GATE"
+    printf 'WAKE_GATE_TOUCH=%s\n' "$WAKE_GATE_TOUCH"
+    printf 'TIMEOUT_ENFORCE=%s\n' "$TIMEOUT_ENFORCE"
+} >> "$tmp"
+chmod 0600 "$tmp" 2>/dev/null
+mv -f "$tmp" "$CFG" 2>/dev/null || {
+    printf '{"ok":false,"msg":"配置文件写入失败"}'
+    exit 0
+}
+
+# touch again: mv does not guarantee a new mtime on all filesystems
+touch "$CFG" 2>/dev/null
+
+eff=0
+[ "$WAKE_GATE" = "1" ] && [ "$WAKE_GATE_TOUCH" = "1" ] && eff=1
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: wake config -> gate=$WAKE_GATE touch=$WAKE_GATE_TOUCH enforce=$TIMEOUT_ENFORCE (touch_effective=$eff)" >> "$LOGDIR/log"
+
+if [ "$WAKE_GATE" = "1" ]; then
+    if [ "$eff" = "1" ]; then desc="仅触摸屏点击或电源键可亮屏"; else desc="仅电源键可亮屏（触摸唤醒已关闭）"; fi
+else
+    desc="不限制亮屏来源"
+fi
+msg="已保存：$desc"
+[ "$TIMEOUT_ENFORCE" = "1" ] && msg="$msg；息屏超时强制执行已开启"
+
+printf '{"ok":true,"gate":%s,"touch":%s,"touch_effective":%s,"enforce":%s,"msg":"%s"}' \
+    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$eff" "$TIMEOUT_ENFORCE" "$msg"

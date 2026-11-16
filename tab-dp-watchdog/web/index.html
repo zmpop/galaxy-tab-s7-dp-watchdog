@@ -45,6 +45,18 @@ h1{font-size:18px}
 .hzbtn.sel .v{color:var(--acc)}
 .hzbtn:disabled{opacity:.5;cursor:default}
 .hzstate{font-size:12px;color:var(--sub);margin-top:8px;font-family:ui-monospace,monospace}
+.row{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--line)}
+.row.first{border-top:none;padding-top:2px}
+.row .rtxt{flex:1;min-width:0}
+.row .rt{font-size:14px;display:block}
+.row .rd{font-size:11.5px;color:var(--sub);display:block;margin-top:3px;line-height:1.5}
+.row.sub{padding-left:16px}
+.row.off{opacity:.5}
+.sw{position:relative;flex:none;width:46px;height:26px;border-radius:999px;border:1px solid var(--line);background:#e4e8ee;cursor:pointer;transition:background .18s,border-color .18s;padding:0}
+.sw .knob{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .18s}
+.sw.on{background:var(--acc);border-color:var(--acc)}
+.sw.on .knob{left:22px}
+.sw:disabled{opacity:.45;cursor:default}
 </style>
 </head>
 <body>
@@ -56,6 +68,37 @@ h1{font-size:18px}
 <div class="card">
   <h2>当前状态</h2>
   <div id="statusLine">加载中…</div>
+</div>
+
+<div class="card">
+  <h2>屏幕唤醒控制</h2>
+  <p class="hint">接外接屏时三星系统会长期持有 HDMI 唤醒锁（SCREEN_DIM_WAKE_LOCK），既会让充电状态跳变、网络/定时唤醒等非用户事件点亮屏幕，也会让系统「自动息屏」失效。下面的开关由模块在本机侧接管这两件事，切换立即生效（无需重启）。</p>
+
+  <div class="row first">
+    <div class="rtxt">
+      <span class="rt">仅触摸 / 电源键亮屏</span>
+      <span class="rd">开启后，不是由触摸屏或电源键触发的亮屏会被自动按灭</span>
+    </div>
+    <button class="sw" id="swGate" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+  </div>
+
+  <div class="row sub" id="rowTouch">
+    <div class="rtxt">
+      <span class="rt">允许点击触摸屏唤醒</span>
+      <span class="rd" id="touchDesc">关闭后只有电源键能点亮屏幕</span>
+    </div>
+    <button class="sw" id="swTouch" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+  </div>
+
+  <div class="row">
+    <div class="rtxt">
+      <span class="rt">强制息屏超时</span>
+      <span class="rd">系统定时器被唤醒锁屏蔽时，按系统「自动息屏」时长兜底强制休眠（当前 <b id="toVal">--</b>）</span>
+    </div>
+    <button class="sw" id="swEnforce" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+  </div>
+
+  <div id="wakeState" class="hzstate">唤醒控制: 读取中…</div>
 </div>
 
 <div class="card">
@@ -106,11 +149,61 @@ h1{font-size:18px}
 
 <script>
 var selected=null, remain=null, closed=false, hzBusy=false;
+// wake control (v1.4.0): gate = 仅触摸/电源键亮屏, touch = 允许触摸唤醒,
+// enforce = 强制息屏超时。touch 仅当 gate=1 时生效。
+var wake={gate:1,touch:1,enforce:1}, wakeBusy=false, wakeLoaded=false;
 
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function toast(msg,ms){var t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show')},ms||3500)}
 function fmt(s){if(s<0)s=0;var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r}
+
+// ---- wake control -------------------------------------------------------
+function paintWake(){
+  var g=$('swGate'), t=$('swTouch'), e=$('swEnforce');
+  g.classList.toggle('on',wake.gate===1);
+  t.classList.toggle('on',wake.touch===1);
+  e.classList.toggle('on',wake.enforce===1);
+  g.setAttribute('aria-checked',wake.gate===1?'true':'false');
+  t.setAttribute('aria-checked',wake.touch===1?'true':'false');
+  e.setAttribute('aria-checked',wake.enforce===1?'true':'false');
+  // 联动：主开关关闭 -> 触摸子开关不可用（保留已保存的值，仅置灰）
+  var live=(wake.gate===1);
+  t.disabled=!live||closed;
+  $('rowTouch').classList.toggle('off',!live);
+  $('touchDesc').textContent=live
+    ? '关闭后只有电源键能点亮屏幕'
+    : '主开关已关闭，此选项暂不生效（其取值仍会保存）';
+}
+
+function saveWake(){
+  if(wakeBusy||closed)return;
+  wakeBusy=true;
+  var body='gate='+wake.gate+'&touch='+wake.touch+'&enforce='+wake.enforce;
+  fetch('cgi-bin/wake',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+   .then(function(r){return r.json()})
+   .then(function(res){
+     if(res.ok){
+       wake.gate=res.gate; wake.touch=res.touch; wake.enforce=res.enforce;
+       paintWake();
+       toast(res.msg||'已保存',4200);
+     }else{
+       toast('保存失败: '+(res.msg||'未知错误'),6000);
+     }
+   })
+   .catch(function(){toast('保存失败：服务可能已关闭',5000);showClosed()})
+   .then(function(){wakeBusy=false;fetchStatus()});
+}
+
+function bindWakeSwitch(id,key){
+  $(id).addEventListener('click',function(){
+    if(closed||wakeBusy)return;
+    if(key==='touch'&&wake.gate!==1)return;   // 子开关联动：主开关关闭时忽略
+    wake[key]=wake[key]?0:1;
+    paintWake();
+    saveWake();
+  });
+}
 
 function showClosed(){
   if(closed)return; closed=true;
@@ -150,6 +243,25 @@ function fetchStatus(){
       }
     }
     if(typeof s.remain==='number'&&s.remain>=0){remain=s.remain}
+
+    // ---- wake control sync ----
+    if(!wakeBusy){
+      wake.gate=(typeof s.gate==='number')?s.gate:1;
+      wake.touch=(typeof s.gate_touch==='number')?s.gate_touch:1;
+      wake.enforce=(typeof s.timeout_enforce==='number')?s.timeout_enforce:1;
+      wakeLoaded=true;
+      paintWake();
+      var to=s.screen_timeout|0;
+      $('toVal').textContent=(to>0)?(Math.round(to/1000)+' 秒'):'未设置';
+      var wt='唤醒控制: '+(s.gate_daemon?'<span class="badge ok">守护运行中</span>':'<span class="badge bad">守护未运行</span>');
+      if(wake.gate===1){
+        wt+='&nbsp;规则: '+(s.gate_touch_effective?'触摸或电源键':'仅电源键');
+      }else{
+        wt+='&nbsp;规则: 不限制';
+      }
+      wt+='&nbsp;息屏超时: '+(wake.enforce?'<span class="badge ok">强制生效</span>':'<span class="badge bad">仅系统默认</span>');
+      $('wakeState').innerHTML=wt;
+    }
   }).catch(function(){showClosed()});
 }
 
@@ -214,8 +326,12 @@ for(var hi=0;hi<hzButtons.length;hi++){
   })(hzButtons[hi]);
 }
 
-$('btnAuto').addEventListener('click',function(){loadDevs('auto')});
-$('btnAll').addEventListener('click',function(){loadDevs('all')});
+bindWakeSwitch('swGate','gate');
+bindWakeSwitch('swTouch','touch');
+bindWakeSwitch('swEnforce','enforce');
+paintWake();
+
+$('btnAuto').addEventListener('click',function(){loadDevs('auto')});$('btnAll').addEventListener('click',function(){loadDevs('all')});
 
 $('btnSave').addEventListener('click',function(){
   if(!selected)return;

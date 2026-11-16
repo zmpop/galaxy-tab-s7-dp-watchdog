@@ -3,6 +3,41 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.4.0
+
+### 新增功能
+
+- **亮屏来源控制（唤醒闸门，默认开启）**：只有触摸屏点击或电源键能点亮屏幕。
+  充电状态跳变、网络/定时唤醒、系统 HDMI 唤醒锁等非用户事件引发的亮屏，
+  会在 1 秒内被自动按灭（`KEYCODE_SLEEP`）。
+  - Web 界面新增**主开关**「仅触摸 / 电源键亮屏」与**子开关**「允许点击触摸屏唤醒」；
+  - 联动：主开关关闭时子开关置灰不生效；子开关关闭时只有电源键能点亮；
+  - 保存：子开关取值始终写入配置（主开关关闭时也保存），重新打开主开关即恢复上次选择；
+    三个开关一次性 POST 到 `cgi-bin/wake`，配置原子替换，守护进程 1 秒内热加载。
+- **息屏超时强制执行（默认开启）**：接外接屏时三星
+  `DisplayDeviceRepository.mHDMIWakeLock`（`SCREEN_DIM_WAKE_LOCK`）长期持有，
+  会屏蔽系统「30 秒自动息屏」，导致到点不黑屏（实测连续亮 5 小时）。
+  模块改为按 `mLastUserActivityTime` 计算真实空闲时长，超过系统设定值（+2 秒容差）
+  后兜底强制休眠；检测到前台应用持有 `SCREEN_BRIGHT_WAKE_LOCK`（如全屏播放）
+  时不干预。
+- 新增独立守护进程 `wakegate.sh`，由 `service.sh` 启停与监督；配置项
+  `WAKE_GATE` / `WAKE_GATE_TOUCH` / `TIMEOUT_ENFORCE`。
+
+### 设计要点
+
+- 唤醒判定依据：电源键走 `logcat` 的 `interceptKeyTq keycode=26`；触摸/输入走
+  `mLastUserActivityTime` 与 `mLastWakeTime` 的差值（±1.5 秒内判定为输入触发），
+  辅以 `dumpsys input` 的 `MotionEvent age`。实测
+  `/sys/class/sec/sec_key/key_pressed_count` 的 `KPWR` 恒为 0、
+  `getevent` 读不到事件（被 `sec_key_notifier` 提前消费），均不可用。
+- 失效保护：5 分钟内抑制超过 8 次即判定依据不可靠，闸门暂停 10 分钟；每次判定
+  都会把证据快照写入日志（`/data/adb/tpdp/log`，`[wake]` 前缀）。
+
+### 修复
+
+- `cgi-bin/status`：整份 `dumpsys power` 输出无法作为 shell 参数传递（ARG_MAX），
+  改为管道预过滤，屏幕状态与息屏超时数值恢复正确上报。
+
 ## v1.3.3
 
 ### 新增功能

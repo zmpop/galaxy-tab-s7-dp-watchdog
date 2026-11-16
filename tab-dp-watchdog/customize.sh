@@ -24,7 +24,7 @@ fi
 # web UI: make CGI scripts executable
 if [ -d "$MODPATH/web" ]; then
   set_perm_recursive "$MODPATH/web" 0 0 0755 0644
-  for f in status devices save recover hz autoshut.sh; do
+  for f in status devices save recover hz wake autoshut.sh; do
     [ -f "$MODPATH/web/cgi-bin/$f" ] && set_perm "$MODPATH/web/cgi-bin/$f" 0 0 0755
   done
   [ -f "$MODPATH/web/autoshut.sh" ] && set_perm "$MODPATH/web/autoshut.sh" 0 0 0755

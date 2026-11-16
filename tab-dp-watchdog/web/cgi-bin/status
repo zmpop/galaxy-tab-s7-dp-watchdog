@@ -7,7 +7,12 @@ LOGDIR=/data/adb/tpdp
 CFG=$LOGDIR/config
 TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300; HZ_MODE=60
 PCLK_CAP_KHZ=300000; PCLK_120_KHZ=560000
+WAKE_GATE=1; WAKE_GATE_TOUCH=1; TIMEOUT_ENFORCE=1
 [ -f "$CFG" ] && . "$CFG" 2>/dev/null
+for v in WAKE_GATE WAKE_GATE_TOUCH TIMEOUT_ENFORCE; do
+    eval "val=\$$v"
+    case "$val" in 0|1) ;; *) eval "$v=1" ;; esac
+done
 # validate HZ_MODE; map legacy LOCK60 (v1.3.2) when no HZ_MODE key exists
 case "$HZ_MODE" in
     60|120|auto) ;;
@@ -59,11 +64,16 @@ vswitch=1
 [ -f "$LOGDIR/video.disabled" ] && vswitch=0
 [ "$VIDEO_SWITCH" = "0" ] && vswitch=0
 scr=unknown
-w=$(dumpsys power 2>/dev/null | sed -n 's/.*mWakefulness=\([A-Za-z]*\).*/\1/p' | head -n 1)
+# NOTE: the full dumpsys output is far too large to be captured into a shell
+# variable (ARG_MAX), so filter it down first.
+pw=$(dumpsys power 2>/dev/null | grep -E 'mWakefulness=|mScreenOffTimeoutSetting=')
+w=$(echo "$pw" | sed -n 's/.*mWakefulness=\([A-Za-z]*\).*/\1/p' | head -n 1)
 case "$w" in
     Awake)         scr=on ;;
     Asleep|Dozing) scr=off ;;
 esac
+to_ms=$(echo "$pw" | sed -n 's/.*mScreenOffTimeoutSetting=\([0-9]\{1,\}\).*/\1/p' | head -n 1)
+case "$to_ms" in ''|*[!0-9]*) to_ms=0 ;; esac
 
 remain=-1
 if [ -f "$LOGDIR/web.start" ]; then
@@ -76,5 +86,12 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s"}\n' \
-    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$HZ_MODE" "$hz_applied" "$hz"
+# screen wake control (v1.4.0)
+wg=0
+pgrep -f 'modules/tab_dp_watchdog/wakegate[.]sh' >/dev/null 2>&1 && wg=1
+touch_eff=0
+[ "$WAKE_GATE" = "1" ] && [ "$WAKE_GATE_TOUCH" = "1" ] && touch_eff=1
+
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s","gate":%d,"gate_touch":%d,"gate_touch_effective":%d,"gate_daemon":%d,"timeout_enforce":%d,"screen_timeout":%d}\n' \
+    "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$HZ_MODE" "$hz_applied" "$hz" \
+    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$touch_eff" "$wg" "$TIMEOUT_ENFORCE" "$to_ms"
