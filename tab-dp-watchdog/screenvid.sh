@@ -289,6 +289,21 @@ cut_video() {
     return 0
 }
 
+# v1.9.2: the entry check in restore_video() is not enough.
+# The repair ladder takes up to ~25s (replug 2s + 12 polls + 4 polls + bounce).
+# Measured 2026-11-26 20:48: the PD was pulled 1s after restore started, otgcut
+# logged "external VBUS gone", and screenvid still walked on into hpd=1 - i.e.
+# straight into the 17:36 panic path. Every stage must re-check before writing.
+vbus_lost_mid_restore() {
+    ext_vbus_ok && return 1
+    log "restore ABORTED at $1: external VBUS disappeared mid-repair ($(vbus_evidence)) - holding the link down instead of forcing HPD"
+    vbus_notice=1
+    vbus_wait=1
+    echo off > "$STATE_FILE"
+    touch "$MARKER"
+    return 0
+}
+
 restore_video() {
     if ! link_present; then
         rm -f "$MARKER"
@@ -326,11 +341,13 @@ restore_video() {
 
     local i=0 ok=0
     # ---- step 1: virtual replug - the only lever that re-enumerates here ----
+    vbus_lost_mid_restore "step1/replug" && return 0
     log "restore: not streaming (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - port_type virtual replug"
     echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
     sleep 2
     echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
     while [ $i -lt 12 ]; do
+        vbus_lost_mid_restore "step1/poll" && return 0
         refresh_actual
         if video_actual_on; then
             ok=1
@@ -342,6 +359,7 @@ restore_video() {
     done
 
     # ---- step 2: hpd simulate-connect (configures a connected link only) ----
+    [ "$ok" = "0" ] && { vbus_lost_mid_restore "step2/hpd" && return 0; }
     if [ "$ok" = "0" ] && ensure_hpd; then
         log "restore: replug ineffective, trying hpd=1"
         echo 1 > "$HPD_NODE" 2>/dev/null
@@ -359,6 +377,7 @@ restore_video() {
     fi
 
     # ---- step 3: screen bounce - display-stack re-enable, the proven repair -
+    [ "$ok" = "0" ] && { vbus_lost_mid_restore "step3/bounce" && return 0; }
     if [ "$ok" = "0" ] && [ "$PD_REPAIR" = "1" ]; then
         log "restore: link enabled but no pixels (pclk=0) - bouncing the screen for a clean encoder re-enable"
         input keyevent 26 2>/dev/null
@@ -366,6 +385,7 @@ restore_video() {
         input keyevent 26 2>/dev/null
         i=0
         while [ $i -lt 6 ]; do
+            vbus_lost_mid_restore "step3/poll" && return 0
             sleep 1
             refresh_actual
             if video_actual_on; then

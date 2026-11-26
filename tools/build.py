@@ -41,6 +41,8 @@ EXEC_NAMES = ('update-binary',)
 REQUIRED = (
     'module.prop',
     'service.sh',
+    'screenvid.sh',
+    'otgcut.sh',
     'META-INF/com/google/android/update-binary',
     'META-INF/com/google/android/updater-script',
 )
@@ -110,6 +112,13 @@ def main():
         mode = z.getinfo('META-INF/com/google/android/update-binary').external_attr >> 16
         if not mode & 0o111:
             raise SystemExit('update-binary is not executable inside the archive')
+        # every CGI must be 0755 in the archive: busybox httpd forks them by
+        # path, so a 0644 CGI answers 500 no matter what customize.sh does
+        for n in names:
+            if n.startswith('web/cgi-bin/'):
+                m = z.getinfo(n).external_attr >> 16
+                if not m & 0o111:
+                    raise SystemExit('%s is not executable inside the archive' % n)
         # module.prop must parse from inside the zip, the way the installer does it
         prop = z.read('module.prop').decode('utf-8', 'replace')
         if 'id=tab_dp_watchdog' not in prop:

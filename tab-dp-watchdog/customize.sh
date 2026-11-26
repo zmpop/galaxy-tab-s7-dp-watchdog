@@ -32,7 +32,7 @@ fi
 # they are executable, so without these chmods the install "succeeds", the
 # dashboard shows the new version, and no daemon ever starts.
 # ---------------------------------------------------------------------------
-for f in service.sh screenvid.sh wakegate.sh action.sh uninstall.sh customize.sh boot-completed.sh post-fs-data.sh; do
+for f in service.sh screenvid.sh wakegate.sh otgcut.sh action.sh uninstall.sh customize.sh boot-completed.sh post-fs-data.sh; do
   [ -f "$MODPATH/$f" ] && set_perm "$MODPATH/$f" 0 0 0755
 done
 [ -f "$MODPATH/module.prop" ] && set_perm "$MODPATH/module.prop" 0 0 0644
@@ -40,7 +40,7 @@ done
 # web UI: make CGI scripts executable
 if [ -d "$MODPATH/web" ]; then
   set_perm_recursive "$MODPATH/web" 0 0 0755 0644
-  for f in status devices save recover hz wake autoshut.sh; do
+  for f in status devices save recover hz wake enable autoshut.sh; do
     [ -f "$MODPATH/web/cgi-bin/$f" ] && set_perm "$MODPATH/web/cgi-bin/$f" 0 0 0755
   done
   [ -f "$MODPATH/web/autoshut.sh" ] && set_perm "$MODPATH/web/autoshut.sh" 0 0 0755

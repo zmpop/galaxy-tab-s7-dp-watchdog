@@ -48,7 +48,7 @@ note() { echo "- $*"; }
 
 # 1) stop the daemons (defensive: the reboot normally already did this).
 #    The patterns are file paths, so they cannot match this script itself.
-for d in service.sh screenvid.sh wakegate.sh powergate.sh web/autoshut.sh; do
+for d in service.sh screenvid.sh wakegate.sh otgcut.sh powergate.sh web/autoshut.sh; do
     pkill -f "modules/tab_dp_watchdog/$d" 2>/dev/null
 done
 if [ -f /data/adb/tpdp/web.pid ]; then
