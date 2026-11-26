@@ -41,7 +41,8 @@
 
 测试：`tests/enable_switch_test.sh`（39 条断言，假 sysfs + 假进程表，含「TERM 不
 响应时才有 KILL」「无供电时绝不抬 HPD」「重复 tick 不动作」）。连同既有四套
-35 + 25 + 15 + otgcut 全通过。
+35 + 25 + 15 + 14 = 89 条全通过。
+
 ## v1.9.2
 
 ### 修复：恢复阶梯跑到一半拔掉 PD 仍会强拉 HPD
@@ -59,6 +60,8 @@
 ```
 restore ABORTED at step1/poll: external VBUS disappeared mid-repair (...) - holding the link down instead of forcing HPD
 ```
+
+## v1.9.1
 
 ### 新增：`otgcut` 守护，真正切断对外 5V 输出
 
@@ -84,8 +87,8 @@ restore ABORTED at step1/poll: external VBUS disappeared mid-repair (...) - hold
 ### 其它
 
 - `customize.sh` / `uninstall.sh`：把 `otgcut.sh` 纳入 chmod 与卸载时的进程清理
-- 配置键 `OTG_CUT`（默认 1）
-
+- 配置键 `OTG_CUT`（默认 1）、`OTG_CUT_GUARD`（默认 1，防误伤 U 盘）
+- 可调参数 `CUT_POLL=0.2` / `CUT_STRIKES=3` / `CUT_RELEASE=20`
 
 ## v1.9.0
 
@@ -150,6 +153,11 @@ tab-dp-watchdog/service.sh
 | `hpd` 两个方向都是空操作 | 写入 `rc=0`，`status/enabled/pclk` 与内核日志零变化 |
 | `otg/online=0` 被内核自己重新打开 | 写入后 1s 内回到 1 |
 | **`port_type` 是唯一真能掐断 5V 的杠杆** | `echo sink > port_type` → `usb/online 1→0`、`dp=disconnected`、`pclk=0`；`echo dual` → 全部恢复 |
+
+> **更正（v1.9.1）**：上表最后一行是当时的判断，v1.8.1 的复测已经不成立——钉 `sink`
+> 并不能停掉 5V，内核约 48 秒后重新装回 Source，期间仍供 1.3–1.5A。真正有效的是
+> **每 200ms 持续压 `otg/online=0`**，见 v1.9.1 的 `otgcut.sh`。本节其余部分保留原样，
+> 因为它记录的是当时基于实测得出的结论与代价。
 
 v1.7.0 沿用了 v1.5.1 的结论「`port_type` 写不进去（`invalid typec_role`）」，
 所以只剩「不碰链路」这一半修复，**没有切断平板自己的 5V 输出**——

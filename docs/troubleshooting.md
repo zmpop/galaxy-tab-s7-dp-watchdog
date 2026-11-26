@@ -165,9 +165,11 @@ TrustZone 收到 SError 后触发安全看门狗复位。
 |---|---|
 | `port0/preferred_role = sink` | `invalid typec_role`,内核拒绝写入 |
 | `port0/port_type = sink`(partner 挂着时) | `max77705_port_type_set: invalid typec_role`,3 次尝试 100% 失败 |
-| 压 `otg/online = 0` | 内核会自行重开 boost,软件开关无效 |
+| 压 `otg/online = 0`(单次写) | 1 秒内被充电驱动重新打开,单次写无效 —— **但持续压制有效,见第十节更正** |
 
-角色翻转无法从软件阻止,所以唯一有效的阻断点是**不让 DP 在无外部供电时重新上流**。
+角色翻转确实无法从软件阻止;但**平板对外输出的 5V 可以压住**(每 200ms 压一次
+`otg/online`),这是 v1.9.1 的 `otgcut.sh`。当时这一格写「软件开关无效」是因为只试了
+单次写入,见[第十节](#十2026-11-26-2100-更正屏幕不断电的真因与有效杠杆)。
 
 ### v1.6.0 修复点
 
@@ -249,12 +251,100 @@ adb shell su -c 'tail -5 /data/adb/tpdp/log'                     # 必须出现 
 ### 手动兜底（无面具环境仍然可用）
 
 ```bash
-adb push tab-dp-watchdog-v1.6.0.zip /sdcard/Download/
-adb shell su -c 'sh /data/local/tmp/inst160.sh'      # = tools/deploy_direct.sh
+adb push tab-dp-watchdog-v1.10.0.zip /data/local/tmp/
+adb shell su -c 'sh /data/local/tmp/deploy_direct.sh /data/local/tmp/tab-dp-watchdog-v1.10.0.zip'
+# 等价于 tools/deploy_direct.sh，无面具 CLI 也能落地
 ```
 
 `tools/deploy_direct.sh` 做的事和安装器一致：解压(去掉 META-INF) → 放进 `/data/adb/modules/tab_dp_watchdog`
 → owner `root:root`、脚本 `0755`、数据 `0644` → 清 `disable/remove/update/skip_mount` 标记 → 校验版本与守卫。
 本模块不含 system 分区 overlay，只有 root 跑的脚本，所以直接放置与安装器产物字节等价。
 
-验证：设备上 `service.sh`/`screenvid.sh`/`wakegate.sh` 三个守护正常拉起，`uninstall.sh` 哈希与仓库 blob 一致。
+验证：设备上 `service.sh`/`screenvid.sh`/`wakegate.sh`/`otgcut.sh` 四个守护正常拉起，
+`uninstall.sh` 哈希与仓库 blob 一致。
+
+## 十、2026-11-26 21:00 更正：屏幕不断电的真因与有效杠杆
+
+### 起因
+
+用户反馈两件事：并入模块后重新拔插 PD「画面不恢复」，以及「拔掉 PD 后触摸屏仍然有电」
+——而并入模块之前的手工补丁版本是能断电的。逐项实测后发现：**能断电的那段逻辑从来
+没进过模块**，而不是模块把功能弄坏了。
+
+### 逐个杠杆实测（SM-T970，root shell，每次只改一个变量）
+
+| 操作 | 结果 | 判定 |
+|---|---|---|
+| `echo 0 > drm_dp/hpd` | `rc=0`、`status/enabled/pclk` 零变化、kmsg 零输出 | **空操作** |
+| `echo 1 > drm_dp/hpd` | `pclk` 0→268500，`dp_display_usbpd_configure_cb` 进内核日志 | 有效（但无供电时是 panic 路径） |
+| `echo sink > port0/port_type` | 立刻断链、`usb/online 1→0`；**约 48 秒后内核重新装回 Source**，期间仍供 1.3–1.5A；回读 `[dual] source sink`，看起来"没生效" | 半有效，且比原厂 ~25s 自然翻转更差 |
+| `echo sink > power_role`（PR_SWAP） | 回读仍 `[source]` | 无效 |
+| `echo 0 > otg/online`（单次） | 1 秒内被充电驱动重新置 1 | 无效 |
+| **每 200ms 压 `otg/online=0`** | 电流从 -1600 附近掉到 -700 以下并保持 | **有效** |
+| 熄屏 | `state 0xa5→0x0`，整条链路拆除 | 有效，但连带拆画面 |
+
+### v1.8.0 的 sink 闸门为什么失败
+
+按 v1.8.0 的设计钉 `port_type=sink` 想断 5V，实测三重代价：
+
+1. partner 挂着时内核直接拒绝（`max77705_port_type_set: invalid typec_role`），
+   只能等它自己掉；
+2. 即使写进去了，内核 48 秒后重新装回 Source，这 48 秒里**仍然在供 1.3–1.5A**；
+3. 端口被钉在 `[source]` 期间**无法充电**，而且这个状态会跨重启保留，得手工写回
+   `dual` 才能恢复。
+
+结论：`SINK_GATE` 默认关闭，只留作实验开关。
+
+### 有效的做法（v1.9.1 `otgcut.sh`）
+
+外部 VBUS 连续 3 次采样缺失即接管，每 200ms 把 `otg/online` 按回 0；PD 回来连续 20
+次采样才释放。安全闸只在对端 `supports_usb_power_delivery=yes` 或本次开机 DP 亮过时
+生效，避免把 U 盘之类的普通 OTG 会话断电。
+
+真机日志：
+
+```
+20:48:13 [otgcut] external VBUS gone - cutting the tablet 5V boost
+20:48:14 [otgcut] otg boost cut #1 (was=1 -> 0) ma=-469
+```
+
+### 附带结论：18:10 那次「验证通过」需要重新解读
+
+回放 `out/verify-20261126-1810/series-window.csv`：t+0 `role=source usb=0 ma=-1929`，
+t+26s `role=sink ma=-872`。也就是说那次平板**同样以 1.9A 在给屏供电**，屏幕"断电"的
+观感来自 DP 一直没恢复（黑屏待机），不是停了 5V。
+
+## 十一、判活陷阱：`status=connected` + `enabled` 会骗过守护
+
+2026-11-26 19:18 的事故现场：
+
+```
+card0-DP-1/status   = connected
+card0-DP-1/enabled  = enabled
+card0-DP-1/dpms     = On
+dp_debug pclock     = 0          <- 实际上一个像素都没在送
+```
+
+守卫当时用 `status=connected && enabled` 判活，于是"确认画面正常"，可屏幕是黑的。原因
+是 PD 刚回来就写了 `hpd=1`，落在 VDM 重协商窗口里，链路停在半协商态。
+
+从那以后（v1.7.0）：判活只看 `dp_debug` 的 `pclock > 0`；PD 回来先 `PD_SETTLE`
+（默认 4 秒）等协商，并且 `usb/online` 要连续 `VBUS_OK_STRIKES`（默认 3）次采样为 1
+才算供电回来——写 `port_type` 期间 VBUS 会 1→0→1 抖动。
+
+## 十二、停用模块的正确姿势（v1.10.0）
+
+`pkill -f tab_dp_watchdog` 看着"停掉了"，其实留下一堆半路状态：`video_off` 标记还在
+（下次开机才会被清）、`sink_gate` 还压着端口、像素时钟上限也没恢复。结果是"关了模块
+但行为还是模块的"。
+
+正确做法是把配置改成 `ENABLED=0`（或界面顶部开关）：
+
+```bash
+adb shell su -c 'sed -i "/^ENABLED=/d" /data/adb/tpdp/config; echo ENABLED=0 >> /data/adb/tpdp/config'
+adb shell su -c 'tail -6 /data/adb/tpdp/log'   # 应出现 switch: master switch OFF ...
+```
+
+`service.sh` 的 `apply_enabled()` 会在一个轮询周期内完成：三个守护退出 → 释放
+`sink_gate`、`port_type` 写回 `dual` → 清 `video_off`（仅在确有外部供电时才抬 HPD）→
+像素时钟上限恢复原值。写回 `ENABLED=1` 后 3 秒内全部恢复，无需重启。

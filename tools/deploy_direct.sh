@@ -1,11 +1,13 @@
 #!/system/bin/sh
-# Install tab-dp-watchdog v1.6.0 without magisk --install-module.
+# Install tab-dp-watchdog without `magisk --install-module`.
 #
-# Why not the CLI installer: on this device (Magisk 28.1:MAGISK:R, SM-T970)
-# `magisk --install-module` aborts with "! Unable to extract zip file!" for
-# EVERY zip, including the untouched official v1.4.0 release. The zip itself is
-# fine (busybox unzip with the installer's own flags extracts it cleanly), so
-# the CLI path is broken here, not the package.
+# Fallback path, kept because it is byte-equivalent and needs no Magisk CLI at
+# all (works from TWRP or when the installer refuses). The original reason this
+# existed - "the CLI installer is broken on this device" - was wrong: every zip
+# failed because build.py wrote each entry under a 'tab-dp-watchdog/' prefix,
+# so the installer looked for ./module.prop and found a directory. Fixed in
+# v1.9.0 (root module.prop + META-INF/com/google/android/update-binary);
+# see docs/troubleshooting.md section 9.
 #
 # A Magisk module is just a directory under /data/adb/modules with a module.prop;
 # this module ships no system overlay, only root-run scripts, so a byte-exact

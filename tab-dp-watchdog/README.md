@@ -2,7 +2,7 @@
 
 ## 解决什么问题
 
-Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的三类"黑屏"问题:
+Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的各类"黑屏/不断电"问题:
 
 | 场景 | 原本需要 | 装模块后 |
 |---|---|---|
@@ -10,11 +10,15 @@ Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的三类"黑屏"问题:
 | 先插一线通、后给屏幕供电 | 重新拔插一线通 | 供电上电后约 10s 内自动恢复 |
 | 运行中 DP 链路偶发掉线 | 重新拔插一线通 | 3~10s 内自动恢复 |
 | **从屏幕端拔插 PD 供电线后卡死**(v1.1.0) | 从电源端重新拔插供电线 | 检测端口震荡卡死,自动虚拟拔插自救 |
+| **拔掉屏幕 PD 后平板 panic 重启**(v1.6.0) | 只能等它重启完 | 无外部供电时绝不重新上流,链路按住不动 |
+| **拔掉 PD 后屏幕仍被平板反供 5V**(v1.9.1) | 无(用户态以为做不到) | `otgcut` 每 200ms 压 `otg/online`,真正断电 |
 
 **检测逻辑**:
-- 故障 A = 触摸屏 USB(04f3:8512)在线 && extcon DP=0
+- 故障 A = 触摸屏 USB(04f3:8512)在线 && 内核报 DP 未出流(`dp_debug pclock=0`)
 - 故障 B(v1.1.0) = 本次开机 DP 曾经=1 && 现在=0 && Type-C partner 在线/闪烁
   (端口震荡卡死签名:对应屏幕端拔插供电线触发的"invalid typec_role"驱动卡死)
+- **判活不能用 `card0-DP-1/status`**(v1.7.0):黑屏时它依然报 `connected` + `enabled`,
+  只有 `pclock > 0` 才代表真的在出流
 - 平板单独使用(从未连屏)永不误触发。
 
 **原理**(本次实测验证):
@@ -26,17 +30,19 @@ Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的三类"黑屏"问题:
 
 ## 安装
 
-Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.4.0.zip → 重启。
+Magisk app → 模块 → 从本地安装 → 选择 `tab-dp-watchdog-v1.10.0.zip` → 重启。
+（KernelSU / APatch 同样可从本地安装；TWRP 可直接刷入。）
 
-## USB 设备选择界面(v1.2.0)
+## 本地配置界面(v1.2.0 起, v1.10.0 扩为四块)
 
 换了触摸屏/扩展坞,不再需要手动改配置文件——点击 Magisk 模块页的**「执行」**按钮,
 平板会自动弹出浏览器打开本地配置界面(`http://127.0.0.1:8899/`):
 
-- **自动搜索**:一键列出"屏幕相关"USB 设备(按名称/USB 类别打分推荐:触摸 > 显示 > 坞站/集线器 > HID);
-- **手动列出**:一键列出当前全部外接 USB 设备,自行挑选;
-- **保存**:选定设备后点击"保存所选设备",写入配置,守护进程数秒内自动热加载(无需重启);
-- **手动恢复**:界面内还有"尝试恢复显示链路"按钮(链路正常时不会动作);
+- **模块总开关**(v1.10.0):顶部「启用模块」,默认开启,详见下文;
+- **屏幕唤醒控制**(v1.4.0):主开关 + 触摸唤醒子开关 + 强制息屏超时;
+- **外接屏刷新率**(v1.3.3):`60` / `120` / `自动`;
+- **USB 设备选择**:自动搜索屏幕相关设备(按名称/USB 类别打分:触摸 > 显示 > 坞站/集线器 > HID)、
+  手动列出全部外接设备、保存后守护进程数秒内热加载(无需重启)、以及"尝试恢复显示链路";
 - 界面**开启 5 分钟后自动关闭**(无论是否操作),服务只绑定 127.0.0.1,不对外网暴露;
   再次开启只需重新点击「执行」。
 
@@ -79,6 +85,22 @@ Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.4.0.zip 
 
 **已知副作用**:切断/恢复在系统层等效于"外接屏被拔出/接入",因此息屏期间窗口会回流到
 平板屏,亮屏后外接屏会重新枚举一次(窗口布局可能重排)。这是 HPD 方案的固有特性。
+
+## 外接屏刷新率档位(v1.3.3)
+
+外接屏跑 2560×1600@120Hz 时链路负载接近临界(像素时钟约 537MHz),会出现**瞬时黑屏**
+与**息屏后自己亮起来**。做法是限制 DP 像素时钟,让框架挑不到高带宽模式:
+
+| 档位(`HZ_MODE`) | 上限(`/sys/kernel/debug/drm_dp/max_pclk_khz`) | 效果 |
+|---|---|---|
+| `60`(默认) | 300000 | 只能 60Hz(268.5MHz),链路最稳 |
+| `120` | 560000 | 允许 120Hz(537MHz) |
+| `auto` | 内核原值(本机 675000) | 不过滤,行为同原厂 |
+
+- 切换档位后需要一次重枚举(`port_type` sink→dual)才会生效;这一步同样受外部供电
+  守卫约束——没有外部供电时只写上限,不做重枚举(否则就是 panic 路径);
+- 上限原值在首次写入前就记录下来,关闭模块或卸载时恢复,不留残留;
+- 界面「外接屏刷新率」卡片与配置 `HZ_MODE` 等价,保存即热加载。
 
 ## 亮屏来源控制与息屏超时强制执行(v1.4.0)
 
@@ -175,47 +197,164 @@ RAMDUMP `eRR.p` 中同一签名 4 次(`RWC 80/83/86/89`)。
 **关闭方式**(不推荐):`/data/adb/tpdp/config` 写 `VBUS_GUARD=0`。
 此时模块恢复 v1.4.0 行为,允许平板用自身电池给屏供电——崩溃风险自负。
 
+## 判活方式与供电防抖(v1.7.0 / v1.8.1)
+
+守卫本身也踩过两个坑,现在都改掉了:
+
+**一、`status=connected` 会骗人(v1.7.0)。** PD 一回来就立刻 `echo 1 > hpd` 会把链路
+打成半协商态:内核报 `status=connected` + `enabled`、`dpms=On`,而 `dp_debug pclock=0`
+——软件以为正常,屏幕是黑的。所以判活统一改成 **`pclock > 0`**,并且:
+
+- `hpd=0` 在本内核是**空操作**(`rc=0`、零状态变化、零内核日志),所有「拉低 HPD」的
+  路径全部删除,不再假装在做事;
+- PD 回来后先 `PD_SETTLE=4` 秒等 VDM 协商结束,再考虑恢复。
+
+**二、VBUS 会抖(v1.8.1)。** 写 `port_type` 期间 `usb/online` 会出现 1→0→1 的跳变,
+单次采样就判定「供电回来了」会在协商窗口里上流(19:18 那次黑屏就是这么来的)。现在
+要求 **连续 `VBUS_OK_STRIKES=3` 次采样**都是 `usb/online=1` 才算回来;启动时心跳计数
+先按满值播种,避免开机瞬间误判成「VBUS 断了」。
+
+`sink` 闸门(`SINK_GATE`)实测无效甚至更差,默认关闭:钉 `sink` 并不能停掉 5V,内核
+约 48 秒后重新装回 Source,期间仍供 1.3–1.5A,比原厂自然翻转的 ~25 秒更差,还会反复
+撕链路让端口卡在 `[source]` 充不进电。保留开关仅供实验。
+
+## 切断对外 5V:拔掉 PD 后屏幕真的没电(v1.9.1)
+
+v1.6.0 只保证「不崩溃」,拔掉 PD 后屏幕其实**一直有电**——平板翻成 Source 用电池反供
+(实测约 1.9A)。要让屏幕断电必须关掉平板的 5V boost,而本机实测有效的杠杆只有一个:
+
+| 杠杆 | 结果 |
+|---|---|
+| `hpd=0` / `power_role=sink` | 空操作 / 被拒,回读仍 `[source]` |
+| `port_type=sink` | 立刻断链,但内核 ~48s 后重装 Source,期间仍供 1.3–1.5A;partner 挂着时直接 `invalid typec_role` |
+| `otg/online=0` 单次写 | 充电驱动 1 秒内重新打开 |
+| **`otg/online=0` 每 200ms 持续压制** | **有效,真正断电** |
+
+`otgcut.sh`(v1.9.1 新增,第四个守护):
+
+- 外部 VBUS 连续 `CUT_STRIKES=3` 次缺失(默认 0.2s 一次)后接管,把 `otg/online` 按回 0;
+- PD 回来连续 `CUT_RELEASE=20` 次采样才释放,避免抖动期反复开合;
+- **安全闸** `OTG_CUT_GUARD=1`:只有对端 `supports_usb_power_delivery=yes`、或本次开机
+  DP 亮过(`/data/adb/tpdp/dp_ever`),才允许压制——否则接 U 盘的普通 OTG 会话也会被断电;
+- 心跳 `hb.otg`,由 `service.sh` 监督;`ENABLED=0` 或卸载时随其它守护一起退出,
+  退出后 `otg/online` 立即交还内核。
+
+判断到底断没断电看电流,不要靠摸:
+
+```bash
+adb shell su -c 'watch -n1 "cat /sys/class/power_supply/battery/current_now; cat /sys/class/power_supply/otg/online"'
+# -1900 左右 = 仍在反供; -700 以上 = 已停供
+```
+
+## 恢复阶梯中途被拔 PD 立即中止(v1.9.2)
+
+`restore_video()` 的阶梯(虚拟拔插 2s + 12 次轮询 + 4 次轮询 + 熄屏亮屏 6 次)要跑 20 多秒。
+此前只在**入口**查一次外部供电,阶梯跑到一半拔线仍会走到 `hpd=1`——正是 17:36 panic
+那条路径(20:48:13 实测撞上,只是运气好没炸)。现在每级执行前、以及每个轮询里都复查
+(`vbus_lost_mid_restore()`),供电消失立即中止:
+
+```
+restore ABORTED at step1/poll: external VBUS disappeared mid-repair (...) - holding the link down instead of forcing HPD
+```
+
+## 模块总开关(v1.10.0,默认启用)
+
+界面顶部「启用模块」,或者配置 `ENABLED`。**`ENABLED=0` 不是「少做一点」,而是「完全不做」**,
+且所有副作用只在一处执行(`service.sh` 的 `apply_enabled()`),Web 端只负责改写配置,
+避免两个写者和 supervisor 抢状态。
+
+| 关闭时 | 原因 |
+|---|---|
+| `screenvid` / `wakegate` / `otgcut` 全部退出(先 TERM,1 秒后仍活着再 KILL) | 实测 `screenvid`、`wakegate` 卡在 `sleep` 里不响应 TERM |
+| 释放 `sink_gate` 标记,`port_type` 写回 `dual` | sink-only 端口**不能充电**,而且这个状态跨重启保留 |
+| 清 `video_off`;**只有确有外部供电**才 `hpd=1` | 无供电强拉 HPD 就是 panic 路径 |
+| 像素时钟上限恢复内核原值 | 否则限帧还在,等于没关干净 |
+| 主循环转纯观察态 | 不碰端口、不做故障恢复、不拉守护,只写心跳 + 盯 `config`,所以随时能再打开 |
+
+开启后三个守护重新拉起、上限重新施加,**3 秒内生效,无需重启**,其它设置(目标设备、
+唤醒控制、刷新率档位)全部保留。
+
+与「面具里禁用模块」的区别:那样要重启才生效,而且不会执行上面这些还原动作。
+
 ## 配置(可选)
 
 复制并编辑 `/data/adb/tpdp/config`:
 
 ```sh
+# ---- 目标设备与轮询 ----
 TP_VID=04f3            # 触摸屏 idVendor
 TP_PID=8512            # 触摸屏 idProduct
 POLL_SEC=3             # 轮询间隔(秒)
 STRIKES=2              # 连续多少次检测到故障才动作(防抖)
 MAX_RETRY=5            # 每次故障最多尝试恢复次数
 BOOT_DELAY=20          # 开机后延迟(秒),等待系统稳定
+
+# ---- 本地配置界面 ----
 WEB_TIMEOUT=300        # 配置界面自动关闭秒数(默认 5 分钟)
+
+# ---- 息屏切断视频(v1.3.0) ----
 VIDEO_SWITCH=1         # 1=息屏切断视频输出, 0=关闭该功能
 POLL_TICKS_ON=15       # 亮屏态: 每多少秒用 dumpsys 兜底校验一次
 POLL_TICKS_OFF=3       # 息屏态: 每多少秒兜底校验一次(越小唤醒恢复越快)
 VIDEO_MAX_FAIL=5       # 切断连续失败多少次后自动停用该功能(保持视频开启)
+
+# ---- 刷新率(v1.3.3) ----
+HZ_MODE=60             # 60 / 120 / auto(像素时钟上限分别 300000 / 560000 / 内核原值)
+PCLK_CAP_KHZ=300000    # 60 档的上限
+PCLK_120_KHZ=560000    # 120 档的上限
+
+# ---- 亮屏来源控制(v1.4.0) ----
 WAKE_GATE=1            # 1=仅触摸/电源键可亮屏, 0=不限制亮屏来源
 WAKE_GATE_TOUCH=1      # 1=允许触摸点击唤醒(仅 WAKE_GATE=1 时生效)
 TIMEOUT_ENFORCE=1      # 1=系统自动息屏被唤醒锁屏蔽时强制休眠
-VBUS_GUARD=1           # 1=无外部供电时禁止任何"重新上流"动作(v1.6.0, 建议保持 1)
-ENABLED=1              # 1=启用模块, 0=完全停手(Web 界面顶部的总开关, v1.10.0)
+
+# ---- 外部供电守卫(v1.6.0 / v1.8.1) ----
+VBUS_GUARD=1           # 1=无外部供电时禁止任何"重新上流"动作(建议保持 1)
+PD_SETTLE=4            # PD 接回后等多少秒让协议协商结束再恢复
+VBUS_OK_STRIKES=3      # usb/online 连续几次采样为 1 才算"供电回来"
+SINK_GATE=0            # 钉 sink 来断电:实测无效且更差,勿开
+
+# ---- 切断对外 5V(v1.9.1) ----
+OTG_CUT=1              # 1=拔 PD 后压制 otg/online, 0=不压制(屏幕会继续被反供)
+OTG_CUT_GUARD=1        # 1=仅对端支持 PD/本次开机 DP 亮过才压制, 防误伤 U 盘
+CUT_POLL=0.2           # 压制周期(秒),5Hz
+CUT_STRIKES=3          # 连续几次无 VBUS 才开始压制
+CUT_RELEASE=20         # 连续几次有 VBUS 才释放
+
+# ---- 总开关(v1.10.0) ----
+ENABLED=1              # 1=启用模块, 0=完全停手(等同界面顶部开关)
 ```
 
 配置文件被修改(含从 Web 界面保存)后,守护进程会在一个轮询周期内自动重新加载。
 
-`ENABLED=0` 不是「少做一点」而是「完全不做」:三个守护(`screenvid` / `wakegate` /
-`otgcut`)全部退出,故障恢复停止,`sink_gate` 与 `video_off` 标记被释放、`port_type`
-写回 `dual`(sink-only 端口不能充电,且该状态跨重启保留),像素时钟上限恢复成内核
-原值。其余设置全部保留,写回 `ENABLED=1` 后 3 秒内恢复,无需重启。
+`ENABLED=0` 的具体行为见上文[模块总开关](#模块总开关v1100默认启用),核心是三个守护
+全部退出、状态标记全部释放、端口与像素时钟交回系统,重新写回 `1` 后 3 秒内恢复。
 
 ## 日志与排错
 
 - 日志: `/data/adb/tpdp/log`(自动截断至 512KB)
 - 手动触发: Magisk 模块页的"执行"按钮(action.sh)
-- 查看链路状态: `adb shell su -c 'cat /sys/class/extcon/extcon0/state'`(DP=1 即正常)
+- 一键看关键状态(判活只看 `pclock`):
+
+```bash
+adb shell su -c 'echo usb=$(cat /sys/class/power_supply/usb/online) otg=$(cat /sys/class/power_supply/otg/online) role=$(cat /sys/class/typec/port0/power_role) ma=$(cat /sys/class/power_supply/battery/current_now); echo dp=$(cat /sys/class/drm/card0-DP-1/status); grep -m1 pclock= /sys/kernel/debug/drm_dp/dp_debug'
+```
+
+- 常见日志行:`restore SUPPRESSED: no external VBUS`(守卫在拦)、
+  `PD settled, link healthy`(供电回来且链路已自愈)、
+  `[otgcut] otg boost cut #N`(5V 被压下去)、`restore ABORTED at step...`(中途被拔线)
 
 ## 已知边界
 
 - 屏幕完全不上电时模块不会动作(触摸 USB 不在线,无从判断目标存在);
   先给屏幕供电,模块会在触摸 USB 枚举后自动接管。
-- `port_type` 写入仅在 root(u:r:magisk:s0)上下文可用,普通 shell 无效。
+- `port_type` 写入仅在 root(u:r:magisk:s0)上下文可用,普通 shell 无效;而且**partner
+  挂着时内核会拒绝**(`max77705_port_type_set: invalid typec_role`),所以断电不能靠
+  它,只能靠 `otgcut` 压 `otg/online`。
+- 5V 切断有两个前提:对端声明支持 PD,或本次开机 DP 亮过。接 U 盘等普通 OTG 设备时
+  `OTG_CUT_GUARD` 会拦住,不会被动断电。
+- sink-only 端口**不能充电**,所以任何把 `port_type` 钉在 `sink` 的方案都是死路
+  (这也是 `SINK_GATE` 默认关闭的原因)。
 - 模块动作只会在 DP 已断链时发生,正常使用中不会打扰工作中的画面。
 
 ## 卸载
@@ -225,8 +364,9 @@ Magisk app → 模块 → 本模块 → **「卸载」**按钮 → 重启。v1.2
 **卸载时会发生什么**:
 1. 点击卸载后模块进入"待卸载"状态(重启后生效;此期间可点「还原」撤销);
 2. 重启时 Magisk 删除模块本体(代码、Web 界面、staged 更新),并执行 `uninstall.sh`:
-   - 终止看门狗守护进程、Web 服务(httpd)及超时脚本(若仍在运行)。kill 前先校验
-     `/proc/<pid>/cmdline`,不会误杀复用了旧 PID 的其他进程;
+   - 终止全部守护(`service` / `screenvid` / `wakegate` / `otgcut`)、Web 服务(httpd)
+     及超时脚本(若仍在运行)。kill 前先校验 `/proc/<pid>/cmdline`,不会误杀复用了
+     旧 PID 的其他进程;`otgcut` 一退出,`otg/online` 立即交还内核,不会继续压制;
    - 还原内核侧改动:像素时钟上限恢复内核默认、被钉成 sink-only 的端口恢复 `dual`、
      DP 视频输出恢复。**最后一步只在 `usb/online=1`(确有外部供电)时执行**,
      否则保持链路关闭——无供电时强拉 HPD 会让 DP 在平板自身电池上重新上流,
