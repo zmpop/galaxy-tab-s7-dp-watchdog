@@ -187,3 +187,32 @@ TrustZone 收到 SError 后触发安全看门狗复位。
 
 行为:PD 断电期间外接屏不显示(预期),PD 接回约 3 秒画面自动恢复;息屏/亮屏切换
 在供电正常时行为完全不变。逃生口 `VBUS_GUARD=0`(不推荐)。
+
+## 九、`magisk --install-module` 报 `! Unable to extract zip file!`（本机已复现）
+
+### 现象
+
+```bash
+adb shell su -c 'magisk --install-module /sdcard/Download/tab-dp-watchdog-v1.6.0.zip'
+- Device is system-as-root
+! Unable to extract zip file!
+```
+
+**不是安装包的问题。** 用官方未改动的 v1.4.0 release 包复现同样报错；而 busybox 用安装器的原样参数
+`unzip -o "$ZIP" -x 'META-INF/*' -d $TMP` 能完整解出 16 个文件。给 PATH 加 `unzip` shim 也无效。
+
+结论：这台机器（Magisk `28.1:MAGISK:R` / SM-T970）的 **CLI 安装器路径**自身有问题。Magisk App 里
+「从本地安装」走的是另一条路径（App 侧解压后交给 magiskd），不受影响。
+
+### 绕法：直接部署（等价，已验证）
+
+```bash
+adb push tab-dp-watchdog-v1.6.0.zip /sdcard/Download/
+adb shell su -c 'sh /data/local/tmp/inst160.sh'      # = tools/deploy_direct.sh
+```
+
+`tools/deploy_direct.sh` 做的事和安装器一致：解压(去掉 META-INF) → 放进 `/data/adb/modules/tab_dp_watchdog`
+→ owner `root:root`、脚本 `0755`、数据 `0644` → 清 `disable/remove/update/skip_mount` 标记 → 校验版本与守卫。
+本模块不含 system 分区 overlay，只有 root 跑的脚本，所以直接放置与安装器产物字节等价。
+
+验证：设备上 `service.sh`/`screenvid.sh`/`wakegate.sh` 三个守护正常拉起，`uninstall.sh` 哈希与仓库 blob 一致。
