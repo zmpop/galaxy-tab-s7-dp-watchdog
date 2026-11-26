@@ -57,6 +57,9 @@ h1{font-size:18px}
 .sw.on{background:var(--acc);border-color:var(--acc)}
 .sw.on .knob{left:22px}
 .sw:disabled{opacity:.45;cursor:default}
+/* master switch off: everything that depends on the module greys out */
+body.modoff .dep{opacity:.42;pointer-events:none}
+#enDesc b{color:var(--tx)}
 </style>
 </head>
 <body>
@@ -71,6 +74,18 @@ h1{font-size:18px}
 </div>
 
 <div class="card">
+  <h2>模块总开关</h2>
+  <p class="hint">关闭后本模块完全停手：DP 链路恢复、屏幕唤醒控制、刷新率限制、拔 PD 断电切断全部停止，端口与 HPD 交回系统默认行为（会自动释放 sink 闸门、恢复像素时钟上限，避免留下只能充电的下游端口）。<b>下面的所有设置都会保留</b>，重新开启即恢复原样，无需重启。</p>
+  <div class="row first">
+    <div class="rtxt">
+      <span class="rt">启用模块</span>
+      <span class="rd" id="enDesc">当前：读取中…</span>
+    </div>
+    <button class="sw" id="swEnable" type="button" role="switch" aria-checked="true"><span class="knob"></span></button>
+  </div>
+</div>
+
+<div class="card dep">
   <h2>屏幕唤醒控制</h2>
   <p class="hint">接外接屏时三星系统会长期持有 HDMI 唤醒锁（SCREEN_DIM_WAKE_LOCK），既会让充电状态跳变、网络/定时唤醒等非用户事件点亮屏幕，也会让系统「自动息屏」失效。下面的开关由模块在本机侧接管这两件事，切换立即生效（无需重启）。</p>
 
@@ -101,7 +116,7 @@ h1{font-size:18px}
   <div id="wakeState" class="hzstate">唤醒控制: 读取中…</div>
 </div>
 
-<div class="card">
+<div class="card dep">
   <h2>外接屏刷新率</h2>
   <p class="hint">通过限制 DP 像素时钟上限控制可选显示模式。<b>60Hz 为默认推荐档</b>：链路带宽需求减半，可消除信号临界导致的黑屏瞬断与息屏自亮；120Hz 流畅度优先，链路压力最大；自动 = 不限制，采用屏幕默认最高模式。切换时外接屏会黑屏约 3 秒，属正常现象。</p>
   <div class="hzopts">
@@ -132,7 +147,7 @@ h1{font-size:18px}
 
 <div id="saveBar">
   <button class="btn" id="btnSave" disabled>保存所选设备</button>
-  <button class="btn sub" id="btnRecover">尝试恢复显示链路</button>
+  <button class="btn sub dep" id="btnRecover">尝试恢复显示链路</button>
 </div>
 
 <div class="card">
@@ -152,6 +167,8 @@ var selected=null, remain=null, closed=false, hzBusy=false;
 // wake control (v1.4.0): gate = 仅触摸/电源键亮屏, touch = 允许触摸唤醒,
 // enforce = 强制息屏超时。touch 仅当 gate=1 时生效。
 var wake={gate:1,touch:1,enforce:1}, wakeBusy=false, wakeLoaded=false;
+// master switch (v1.10.0): on = module active, engines = daemons alive now
+var en={on:1,busy:false,engines:-1};
 
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -205,6 +222,52 @@ function bindWakeSwitch(id,key){
   });
 }
 
+// ---- master switch (v1.10.0) --------------------------------------------
+// The switch never claims a state it cannot verify: while the supervisor is
+// tearing the daemons down (up to one poll cycle, 3s) the label says so and
+// the toggle stays disabled. The config value is what we write; the number of
+// live daemons is what we report.
+function paintEnable(){
+  var s=$('swEnable');
+  s.classList.toggle('on',en.on===1);
+  s.setAttribute('aria-checked',en.on===1?'true':'false');
+  document.body.classList.toggle('modoff',en.on!==1);
+  var d;
+  if(en.busy)      d='正在切换…';
+  else if(en.on===1) d=(en.engines>0?('已启用 · '+en.engines+' 个守护进程运行中'):'已启用 · 守护进程启动中');
+  else               d=(en.engines>0?('已停用 · 正在退出守护进程（剩余 '+en.engines+'）'):'已停用 · 端口已交回系统');
+  $('enDesc').textContent='当前：'+d;
+}
+
+$('swEnable').addEventListener('click',function(){
+  if(closed||en.busy)return;
+  var want=en.on?0:1;
+  en.busy=true; en.on=want;          // optimistic paint, corrected by status
+  this.disabled=true;
+  paintEnable();
+  fetch('cgi-bin/enable',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'enabled='+want})
+   .then(function(r){return r.json()})
+   .then(function(res){
+     if(res.ok){
+       en.on=res.enabled;
+       if(typeof res.running==='number')en.engines=res.running;
+       toast(res.msg||'已保存',5000);
+     }else{
+       en.on=want?0:1;                 // roll back
+       toast('切换失败: '+(res.msg||'未知错误'),6000);
+     }
+     paintEnable();
+   })
+   .catch(function(){en.on=want?0:1;paintEnable();toast('请求失败：服务可能已关闭',5000);showClosed()})
+   .then(function(){
+     en.busy=false;
+     var me=$('swEnable'); me.disabled=closed;
+     // the supervisor needs up to one poll cycle; sample a few times so the
+     // badge shows the settled daemon count instead of the transient one
+     var n=0, t=setInterval(function(){fetchStatus();if(++n>=5)clearInterval(t)},1200);
+   });
+});
+
 function showClosed(){
   if(closed)return; closed=true;
   $('closed').style.display='flex';
@@ -249,6 +312,13 @@ function fetchStatus(){
       }
     }
     if(typeof s.remain==='number'&&s.remain>=0){remain=s.remain}
+
+    // ---- master switch sync ----
+    if(typeof s.enabled==='number'&&!en.busy){
+      en.on=s.enabled;
+      en.engines=(typeof s.engines==='number')?s.engines:-1;
+      paintEnable();
+    }
 
     // ---- wake control sync ----
     if(!wakeBusy){
@@ -336,6 +406,7 @@ bindWakeSwitch('swGate','gate');
 bindWakeSwitch('swTouch','touch');
 bindWakeSwitch('swEnforce','enforce');
 paintWake();
+paintEnable();
 
 $('btnAuto').addEventListener('click',function(){loadDevs('auto')});$('btnAll').addEventListener('click',function(){loadDevs('all')});
 

@@ -69,9 +69,16 @@ TIMEOUT_ENFORCE=1      # 1 = force the system screen-off timeout to take effect
 VBUS_GUARD=1           # 1 = never touch the DP link while external VBUS is absent
 PD_SETTLE=4            # v1.7.0: seconds to let the PD contract settle before recovering
 SINK_GATE=0            # v1.8.1: default OFF (see screenvid.sh - pinning sink does not cut VBUS)
+ENABLED=1              # v1.10.0: master switch; 0 = module idle, port handed back to stock
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
+# v1.10.0: the master switch is read before anything acts on the port, so a
+# corrupt value must never be able to leave the module half-configured.
+case "$ENABLED" in
+    0|1) ;;
+    *) ENABLED=1 ;;
+esac
 # validate HZ_MODE; map legacy LOCK60 (v1.3.2) when no HZ_MODE key exists
 case "$HZ_MODE" in
     60|120|auto) ;;
@@ -254,6 +261,93 @@ start_otgcut() {
     nohup sh "$MODDIR/otgcut.sh" >/dev/null 2>&1 &
 }
 
+# ---------- v1.10.0: master switch (web UI 「启用模块」) ----------
+# ENABLED=0 means "hands off": the three engine daemons are stopped, every
+# transient marker this module created is released and the fault engine stops
+# touching the port, so stock framework behaviour takes over. Everything else
+# (selected device, refresh mode, wake options) is kept in the config, so
+# flipping it back on restores the previous behaviour without a reboot - and
+# without the user having to redo any setting.
+ENGINES="screenvid wakegate otgcut"
+
+daemons_stop() {
+    local name pat pids
+    for name in $ENGINES; do
+        pat="modules/tab_dp_watchdog/${name}[.]sh"
+        pids=$(pgrep -f "$pat" 2>/dev/null)
+        [ -z "$pids" ] && continue
+        kill $pids 2>/dev/null
+        log "switch: TERM -> $name ($pids)"
+    done
+    sleep 1
+    for name in $ENGINES; do
+        pat="modules/tab_dp_watchdog/${name}[.]sh"
+        pgrep -f "$pat" >/dev/null 2>&1 || continue
+        pkill -9 -f "$pat" 2>/dev/null
+        log "switch: KILL -> $name (did not honour TERM)"
+    done
+}
+
+# Undo what this module did to the port. Order matters: release the sink gate
+# first (a sink-only port cannot charge, and that persists across reboots),
+# then the video cut - and only raise HPD when real external power is present,
+# otherwise raising it re-streams DP off the tablet's own battery (the 17:36
+# panic path).
+release_handoff() {
+    if gate_is_on; then
+        rm -f "$GATE_MARKER" "$GATE_TS" 2>/dev/null
+        echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
+        log "switch: sink gate released -> port_type=dual (charging restored)"
+    fi
+    if [ -f "$LOGDIR/video_off" ]; then
+        rm -f "$LOGDIR/video_off"
+        echo on > "$LOGDIR/video.state" 2>/dev/null
+        [ -e "$HPD_NODE" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+        if ext_vbus_ok; then
+            echo 1 > "$HPD_NODE" 2>/dev/null
+            log "switch: video_off cleared, hpd=1 (external VBUS present)"
+        else
+            log "switch: video_off cleared, HPD left LOW - no external VBUS ($(vbus_evidence))"
+        fi
+    fi
+}
+
+# Idempotent: logs only on a real transition, so the poll loop may call it
+# every tick without spamming the log. $1 = why the state is being applied.
+apply_enabled() {
+    if [ "$ENABLED" = "1" ]; then
+        if [ "$enabled_prev" != "1" ]; then
+            log "switch: master switch ON ($1) - starting daemons"
+            start_screenvid
+            start_wakegate
+            start_otgcut
+            if [ "$HZ_MODE" != "auto" ] && [ "$hz_applied" != "$HZ_MODE" ]; then
+                if apply_hz_mode "$HZ_MODE"; then
+                    hz_applied=$HZ_MODE
+                    log "switch: refresh cap re-applied ($HZ_MODE -> $(hz_cap_for "$HZ_MODE")kHz)"
+                fi
+            fi
+        fi
+    else
+        if [ "$enabled_prev" != "0" ]; then
+            log "switch: master switch OFF ($1) - stopping daemons, handing the port back to stock"
+            daemons_stop
+            release_handoff
+            if [ "$HZ_MODE" != "auto" ]; then
+                if apply_hz_mode auto; then
+                    # must track it: leaving hz_applied=$HZ_MODE here made both
+                    # the reload path and the ON path believe the cap was still
+                    # in force, so re-enabling silently skipped the re-apply
+                    hz_applied=auto
+                    log "switch: pixel clock cap restored to $(pclk_org)kHz (no filtering)"
+                fi
+            fi
+        fi
+    fi
+    enabled_prev=$ENABLED
+}
+# -------------------------------------------------------
+
 # At boot, never leave the external screen black because a previous session
 # died while the video output was cut: clear the marker and, if a partner is
 # attached while the connector is off, force HPD high.
@@ -335,12 +429,15 @@ virtual_replug() {
 
 MODVER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
 [ -n "$MODVER" ] || MODVER=unknown
-log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, hz=${HZ_MODE}, wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH}, timeout_enforce=${TIMEOUT_ENFORCE}) ====="
-boot_video_failsafe
-hz_boot
-start_screenvid
-start_wakegate
-start_otgcut
+log "===== service $MODVER started (poll=${POLL_SEC}s, vid:pid=$TP_VID:$TP_PID, hz=${HZ_MODE}, wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH}, timeout_enforce=${TIMEOUT_ENFORCE}, enabled=${ENABLED}) ====="
+enabled_prev=-1
+if [ "$ENABLED" = "1" ]; then
+    boot_video_failsafe
+    hz_boot
+else
+    log "switch: master switch is OFF in config - boot failsafe and refresh cap skipped, daemons not started"
+fi
+apply_enabled "startup"
 sleep "$BOOT_DELAY"
 
 strike=0
@@ -353,6 +450,48 @@ while true; do
 
     # heartbeat for the mutual supervision with screenvid
     date +%s > "$LOGDIR/hb.main"
+
+    # hot-reload config FIRST: a switch flipped in the web UI has to take
+    # effect in this tick, because daemon supervision below depends on it.
+    if [ -f "$LOGDIR/config" ]; then
+        mt=$(date -r "$LOGDIR/config" +%s 2>/dev/null || echo 0)
+        if [ "$mt" != "$cfg_mtime" ]; then
+            cfg_mtime=$mt
+            . "$LOGDIR/config" 2>/dev/null
+            case "$HZ_MODE" in
+                60|120|auto) ;;
+                *) HZ_MODE=60 ;;
+            esac
+            # v1.10.0: re-validate the master switch on every reload - a typo
+            # must fall back to "on", never to a state no daemon understands.
+            case "$ENABLED" in
+                0|1) ;;
+                *) ENABLED=1 ;;
+            esac
+            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s hz=$HZ_MODE wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH} timeout_enforce=${TIMEOUT_ENFORCE} enabled=$ENABLED"
+            strike=0
+            # reconcile the refresh cap with the kernel. The web CGI applies
+            # the cap AND the re-enumeration itself before saving the config,
+            # so this only needs to mirror manual config edits: the kernel
+            # write is idempotent, no mode switch is forced here.
+            if [ "$ENABLED" = "1" ] && [ "$HZ_MODE" != "$hz_applied" ]; then
+                if apply_hz_mode "$HZ_MODE"; then
+                    hz_applied=$HZ_MODE
+                    log "hz mode: $HZ_MODE (cap $(hz_cap_for "$HZ_MODE")kHz)"
+                fi
+            fi
+        fi
+    fi
+
+    apply_enabled "config"
+
+    # Master switch off: the module must be a pure observer. No port writes, no
+    # fault recovery, no daemon supervision - just keep the heartbeat and keep
+    # watching the config, so flipping the switch back on resumes everything.
+    if [ "$ENABLED" != "1" ]; then
+        continue
+    fi
+
     start_screenvid
     start_wakegate
     start_otgcut
@@ -373,30 +512,6 @@ while true; do
         fi
     else
         gate_back=0
-    fi
-
-    # hot-reload config if it changed (e.g. saved from the web UI)
-    if [ -f "$LOGDIR/config" ]; then
-        mt=$(date -r "$LOGDIR/config" +%s 2>/dev/null || echo 0)
-        if [ "$mt" != "$cfg_mtime" ]; then
-            cfg_mtime=$mt
-            . "$LOGDIR/config" 2>/dev/null
-            case "$HZ_MODE" in
-                60|120|auto) ;;
-                *) HZ_MODE=60 ;;
-            esac
-            log "config reloaded: vid:pid=$TP_VID:$TP_PID poll=${POLL_SEC}s hz=$HZ_MODE wake_gate=${WAKE_GATE}/${WAKE_GATE_TOUCH} timeout_enforce=${TIMEOUT_ENFORCE}"
-            strike=0
-            # reconcile the refresh cap with the kernel. The web CGI applies
-            # the cap AND the re-enumeration itself before saving the config,
-            # so this only needs to mirror manual config edits: the kernel
-            # write is idempotent, no mode switch is forced here.
-            if [ "$HZ_MODE" != "$hz_applied" ]; then
-                hz_applied=$HZ_MODE
-                apply_hz_mode "$HZ_MODE" && \
-                    log "hz mode: $HZ_MODE (cap $(hz_cap_for "$HZ_MODE")kHz)"
-            fi
-        fi
     fi
 
     # Video output intentionally cut (screen off, handled by screenvid):

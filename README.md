@@ -102,6 +102,16 @@ adb shell su -c 'ls /data/adb/tpdp 2>&1; ls /data/adb/modules | grep tab_dp; pgr
 - **手动列出** — 一键列出全部外接 USB 设备自行挑选；
 - **保存** — 写入配置后守护进程约 3 秒内热加载，无需重启。
 
+**v1.10.0 起界面顶部有「启用模块」总开关（默认启用）**：关掉即让模块完全停手——
+三个守护退出、故障恢复停止、sink 闸门与视频切断自动释放、像素时钟上限恢复原值，
+端口与 HPD 交回系统默认行为；所有其它设置保留，重新开启 3 秒内恢复，无需重启。
+配置键为 `ENABLED`（`1`/`0`，默认 `1`）：
+
+```bash
+# 等效于界面开关（守护 3 秒内响应）
+adb shell su -c 'sed -i "/^ENABLED=/d" /data/adb/tpdp/config; echo ENABLED=0 >> /data/adb/tpdp/config'
+```
+
 详见 [tab-dp-watchdog/README.md](tab-dp-watchdog/README.md)。
 
 ## 兼容性

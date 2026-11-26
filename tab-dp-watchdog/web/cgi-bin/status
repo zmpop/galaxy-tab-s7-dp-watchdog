@@ -7,9 +7,9 @@ LOGDIR=/data/adb/tpdp
 CFG=$LOGDIR/config
 TP_VID=04f3; TP_PID=8512; WEB_TIMEOUT=300; HZ_MODE=60
 PCLK_CAP_KHZ=300000; PCLK_120_KHZ=560000
-WAKE_GATE=1; WAKE_GATE_TOUCH=1; TIMEOUT_ENFORCE=1
+WAKE_GATE=1; WAKE_GATE_TOUCH=1; TIMEOUT_ENFORCE=1; ENABLED=1
 [ -f "$CFG" ] && . "$CFG" 2>/dev/null
-for v in WAKE_GATE WAKE_GATE_TOUCH TIMEOUT_ENFORCE; do
+for v in WAKE_GATE WAKE_GATE_TOUCH TIMEOUT_ENFORCE ENABLED; do
     eval "val=\$$v"
     case "$val" in 0|1) ;; *) eval "$v=1" ;; esac
 done
@@ -99,6 +99,14 @@ pgrep -f 'modules/tab_dp_watchdog/wakegate[.]sh' >/dev/null 2>&1 && wg=1
 touch_eff=0
 [ "$WAKE_GATE" = "1" ] && [ "$WAKE_GATE_TOUCH" = "1" ] && touch_eff=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s","gate":%d,"gate_touch":%d,"gate_touch_effective":%d,"gate_daemon":%d,"timeout_enforce":%d,"screen_timeout":%d,"usb_online":%d,"vbus_guard":%d}\n' \
+# master switch (v1.10.0): how many of the three engine daemons are alive right
+# now. The UI uses it to show "停用中…" while the supervisor is still tearing
+# them down, instead of claiming a state it cannot verify.
+engines=0
+for e in screenvid wakegate otgcut; do
+    pgrep -f "modules/tab_dp_watchdog/${e}[.]sh" >/dev/null 2>&1 && engines=$((engines + 1))
+done
+
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s","gate":%d,"gate_touch":%d,"gate_touch_effective":%d,"gate_daemon":%d,"timeout_enforce":%d,"screen_timeout":%d,"usb_online":%d,"vbus_guard":%d,"enabled":%d,"engines":%d}\n' \
     "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$HZ_MODE" "$hz_applied" "$hz" \
-    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$touch_eff" "$wg" "$TIMEOUT_ENFORCE" "$to_ms" "$usb_online" "$vbg"
+    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$touch_eff" "$wg" "$TIMEOUT_ENFORCE" "$to_ms" "$usb_online" "$vbg" "$ENABLED" "$engines"

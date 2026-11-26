@@ -54,7 +54,7 @@ extract() {
         inside && /^}$/ { exit }
     ' "$SV"
 }
-for f in ext_vbus_ok vbus_evidence dp_pclk video_real_streaming restore_video; do
+for f in ext_vbus_ok vbus_evidence dp_pclk video_real_streaming vbus_lost_mid_restore restore_video; do
     body=$(extract "$f")
     [ -n "$body" ] || { echo "FATAL: could not extract $f - did screenvid.sh change shape?"; exit 1; }
     eval "$body"

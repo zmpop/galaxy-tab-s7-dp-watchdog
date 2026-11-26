@@ -1,0 +1,78 @@
+#!/system/bin/sh
+# CGI: master switch (v1.10.0).
+#
+# POST body: enabled=0|1
+#   1 = module active (default): DP watchdog, screen wake gate, refresh cap,
+#       external PD cut-off all run.
+#   0 = module idle: service.sh stops the three daemons, releases the sink gate
+#       and the video cut, and restores the pixel clock limit, i.e. the port
+#       behaves like stock. Every other setting is preserved in the config, so
+#       switching back on resumes the previous behaviour without a reboot.
+#
+# service.sh polls the config every POLL_SEC (3s) and applies the transition in
+# that tick, so this CGI only persists the value - it never kills a daemon
+# itself. Two writers to the same state would race with the supervisor.
+echo "Content-Type: application/json"
+echo ""
+
+LOGDIR=/data/adb/tpdp
+CFG=$LOGDIR/config
+mkdir -p "$LOGDIR"
+ENABLED=1
+[ -f "$CFG" ] && . "$CFG" 2>/dev/null
+case "$ENABLED" in 0|1) ;; *) ENABLED=1 ;; esac
+
+body=""
+if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ]; then
+    body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+
+v=$(printf '%s' "$body" | sed -n 's/.*enabled=\([^&]*\).*/\1/p' | head -n 1)
+if [ -z "$v" ]; then
+    printf '{"ok":false,"msg":"缺少 enabled 参数"}'
+    exit 0
+fi
+case "$v" in
+    0|1) ENABLED=$v ;;
+    *)   printf '{"ok":false,"msg":"enabled 参数无效（需要 0 或 1）"}'; exit 0 ;;
+esac
+
+# atomic rewrite: drop our key, re-append, rename over the original. mv alone
+# does not guarantee a new mtime on every filesystem, so touch afterwards -
+# that mtime is what service.sh watches for hot-reload.
+touch "$CFG" 2>/dev/null
+tmp="$CFG.tmp"
+if [ -f "$CFG" ]; then
+    grep -v -E '^ENABLED=' "$CFG" > "$tmp" 2>/dev/null
+else
+    : > "$tmp"
+fi
+printf 'ENABLED=%s\n' "$ENABLED" >> "$tmp"
+chmod 0600 "$tmp" 2>/dev/null
+mv -f "$tmp" "$CFG" 2>/dev/null || {
+    printf '{"ok":false,"msg":"配置文件写入失败"}'
+    exit 0
+}
+touch "$CFG" 2>/dev/null
+
+# Report what is actually running right now; the UI keeps polling status and
+# replaces it with the settled state once the supervisor has acted.
+running=0
+for d in screenvid wakegate otgcut; do
+    pgrep -f "modules/tab_dp_watchdog/${d}[.]sh" >/dev/null 2>&1 && running=$((running + 1))
+done
+svc=0
+pgrep -f 'modules/tab_dp_watchdog/service.sh' >/dev/null 2>&1 && svc=1
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') web: master switch -> enabled=$ENABLED (engines running=$running, supervisor=$svc)" >> "$LOGDIR/log"
+
+if [ "$ENABLED" = "1" ]; then
+    msg="已启用：守护进程将在 3 秒内拉起"
+    [ "$running" -ge 1 ] && msg="已启用：$running 个守护进程在运行"
+else
+    msg="已停用：守护进程将在 3 秒内退出，端口交回系统"
+fi
+[ "$svc" = "1" ] || msg="$msg（注意：主守护 service.sh 未运行，开关会在下次开机生效）"
+
+printf '{"ok":true,"enabled":%s,"running":%s,"supervisor":%s,"msg":"%s"}' \
+    "$ENABLED" "$running" "$svc" "$msg"
