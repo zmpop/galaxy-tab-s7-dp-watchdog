@@ -32,7 +32,7 @@ fi
 # they are executable, so without these chmods the install "succeeds", the
 # dashboard shows the new version, and no daemon ever starts.
 # ---------------------------------------------------------------------------
-for f in service.sh screenvid.sh wakegate.sh action.sh uninstall.sh customize.sh boot-completed.sh post-fs-data.sh; do
+for f in service.sh screenvid.sh wakegate.sh otgcut.sh action.sh uninstall.sh customize.sh boot-completed.sh post-fs-data.sh; do
   [ -f "$MODPATH/$f" ] && set_perm "$MODPATH/$f" 0 0 0755
 done
 [ -f "$MODPATH/module.prop" ] && set_perm "$MODPATH/module.prop" 0 0 0644

@@ -3,6 +3,51 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.9.2
+
+### 修复：恢复阶梯跑到一半拔掉 PD 仍会强拉 HPD
+
+`restore_video()` 此前只在**入口**检查一次外部供电。而阶梯本身要跑 20 多秒
+（虚拟拔插 2s + 12 次轮询 + 4 次轮询 + 熄屏亮屏 6 次），中途 PD 被拔掉时它会
+照旧走到最后一级 `hpd=1`——那就是 17:36 内核 panic 的同一条路径。
+
+2026-11-26 20:48:13 实测撞上：`otgcut` 已经在报 `external VBUS gone`，
+`screenvid` 还在往下走 `port_type` 虚拟拔插 → `hpd=1`，只是那次运气好没炸。
+
+现在每一级执行前、以及每个轮询里都复查（`vbus_lost_mid_restore()`），
+一旦发现供电消失立即中止并保持链路关闭：
+
+```
+restore ABORTED at step1/poll: external VBUS disappeared mid-repair (...) - holding the link down instead of forcing HPD
+```
+
+### 新增：`otgcut` 守护，真正切断对外 5V 输出
+
+这是「拔掉 PD 后触摸屏还有电」的最终解法。此前所有断电尝试都基于
+`port_type=sink`，而这台机器的内核在 partner 挂着时直接拒绝写入
+（`max77705_port_type_set: invalid typec_role`）。真正有效的是
+`/sys/class/power_supply/otg/online`，但**单次写入会被充电驱动 1 秒内复原**，
+必须持续压制。
+
+`otgcut.sh` 的做法：外部 VBUS 连续 3 次采样缺失后接管，每 200ms 把
+`otg/online` 按回 0，PD 回来连续 20 次采样才释放。带安全闸——只有对端声明
+支持 PD、或本次开机 DP 亮过，才会压制，避免把普通 USB-OTG 会话（U 盘）也断电。
+
+真机验证：
+
+```
+20:48:13 [otgcut] external VBUS gone - cutting the tablet 5V boost
+20:48:14 [otgcut] otg boost cut #1 (was=1 -> 0) ma=-469
+```
+
+测试：`tests/otgcut_test.sh`（14 条断言，含「内核反复重开 boost 时必须再压」）。
+
+### 其它
+
+- `customize.sh` / `uninstall.sh`：把 `otgcut.sh` 纳入 chmod 与卸载时的进程清理
+- 配置键 `OTG_CUT`（默认 1）
+
+
 ## v1.9.0
 
 ### 修复：这个包从来就不是一个合法的面具模块

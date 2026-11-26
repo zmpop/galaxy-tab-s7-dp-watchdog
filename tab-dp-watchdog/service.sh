@@ -241,6 +241,19 @@ start_wakegate() {
     nohup sh "$MODDIR/wakegate.sh" >/dev/null 2>&1 &
 }
 
+# Start otgcut (v1.9.1) if it is not running.
+# This is the daemon that actually depowers the external screen when its PD
+# supply disappears: it holds /sys/class/power_supply/otg/online at 0 every
+# 200ms while external VBUS is absent. A single write is undone by the charger
+# driver within a second, which is why the module's earlier attempts (all of
+# them based on port_type) never stopped the 5V output. See otgcut.sh.
+start_otgcut() {
+    [ -f "$MODDIR/otgcut.sh" ] || return 0
+    pgrep -f 'modules/tab_dp_watchdog/otgcut[.]sh' >/dev/null 2>&1 && return 0
+    log "otgcut not running -> starting it"
+    nohup sh "$MODDIR/otgcut.sh" >/dev/null 2>&1 &
+}
+
 # At boot, never leave the external screen black because a previous session
 # died while the video output was cut: clear the marker and, if a partner is
 # attached while the connector is off, force HPD high.
@@ -327,6 +340,7 @@ boot_video_failsafe
 hz_boot
 start_screenvid
 start_wakegate
+start_otgcut
 sleep "$BOOT_DELAY"
 
 strike=0
@@ -341,6 +355,7 @@ while true; do
     date +%s > "$LOGDIR/hb.main"
     start_screenvid
     start_wakegate
+    start_otgcut
 
     # ---- v1.8.0: sink-gate safety net ----
     # A sink-only port cannot charge. If VBUS is present while the gate marker
