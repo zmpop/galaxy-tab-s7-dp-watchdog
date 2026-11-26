@@ -232,7 +232,7 @@ function fetchStatus(){
     var scrTxt=s.screen==='on'?'亮屏':(s.screen==='off'?'息屏':'未知');
     h+='<br>屏幕: '+scrTxt+'&nbsp;&nbsp;视频输出: '+(s.video==='off'?'<span class="badge bad">已切断</span>':'<span class="badge ok">开启</span>');
     h+='&nbsp;&nbsp;息屏切断: '+(s.video_switch?'<span class="badge ok">启用</span>':'<span class="badge bad">停用</span>');
-    // v1.5.0: external VBUS guard indicator
+    // v1.6.0: external VBUS guard indicator
     if(typeof s.usb_online==='number'){
       var vb=s.usb_online===1?'<span class="badge ok">正常</span>'
             :(s.usb_online===0?'<span class="badge bad">未接 · 链路已守卫</span>':'<span class="badge">未知</span>');

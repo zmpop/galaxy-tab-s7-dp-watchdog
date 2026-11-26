@@ -3,7 +3,7 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
-## v1.5.0
+## v1.6.0
 
 ### 修复（重要）
 
@@ -50,7 +50,34 @@
 - 屏幕 PD 断电期间外接屏不显示（这是预期行为：宁可黑屏，不要重启）。接回 PD 后
   画面自动恢复，无需重新插拔一线通。
 - 若确实需要"平板给屏供电"（不接屏侧 PD），必须显式设置 `VBUS_GUARD=0`，
-  此时 v1.5.0 的保护失效，崩溃风险自负。
+  此时 v1.6.0 的保护失效，崩溃风险自负。
+
+### 卸载与升级彻底化
+
+- **卸载脚本修掉三个洞**（审计"在面具里点移除能不能卸干净"时发现）：
+  1. `echo 1 > drm_dp/hpd` 原先无条件执行 —— 若卸载时外屏 PD 不在位，这一步会
+     重演本文上半部分的 panic 路径。现改为仅在 `usb/online=1` 时恢复，否则保持
+     链路关闭（下次接线自然重新枚举，无害）；
+  2. `kill $(cat web.pid)` 可能杀掉无关进程 —— 重启后该 PID 常被系统复用。
+     现改为先校验 `/proc/<pid>/cmdline` 含 `httpd` 才 kill；
+  3. `echo dual > port_type` 原先无条件写入 —— 现仅在端口确实被钉成 `[sink]`
+     （旧供电角色守护留下的状态）时才改回 `dual`，不打扰健康端口。
+- 卸载时 Magisk 删除模块目录（含旧 `powergate.sh`、`screenvid.sh.bak-*`），
+  本脚本删除 `/data/adb/tpdp` 并复核残留，结果打印到 Magisk 安装日志。
+  模块不写 `service.d` / `post-fs-data.d`，不改任何系统属性，因此移除后
+  `/data/adb` 下不留任何本模块文件。
+- **升级即清理**：`customize.sh` 会删除 `hb.power` 并移除已废弃的
+  `POWER_ROLE_MODE` 配置项，避免从 v1.5.1 升级后留下孤儿状态。
+
+### 与 v1.5.1 的关系
+
+v1.5.1（仅存在于设备上，未发布）走的是另一条路线：新增 `powergate.sh`，想通过
+`preferred_role` / `port_type=sink` 从源头禁止平板对外供 5V。实测本机内核在 partner
+仍然注册时**拒绝一切**相关写入（`max77705_port_type_set: invalid typec_role`），
+且 `otg/online` 会被内核自行重开，该方案已证伪并整体移除。
+
+v1.6.0 不再试图阻止角色翻转（做不到），而是阻断唯一致死的动作——
+在没有外部供电时让 DP 重新上流。这是 4 次复测验证有效的方案。
 
 ## v1.4.0
 

@@ -17,7 +17,7 @@ if grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null; then
     exit 0
 fi
 
-# v1.5.0: a replug re-negotiates CC/PD/VDM/DP -> it re-streams DP. Without
+# v1.6.0: a replug re-negotiates CC/PD/VDM/DP -> it re-streams DP. Without
 # external VBUS the tablet is Source and feeds the screen from its battery;
 # doing this is the confirmed kernel panic path, so refuse instead.
 usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)

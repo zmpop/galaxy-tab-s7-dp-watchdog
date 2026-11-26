@@ -86,7 +86,7 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
-# external VBUS guard (v1.5.0): 1 = external power present, 0 = absent
+# external VBUS guard (v1.6.0): 1 = external power present, 0 = absent
 # (tablet is Source, powering the screen from its own battery), -1 = unknown
 usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)
 case "$usb_online" in ''|*[!0-9]*) usb_online=-1 ;; esac

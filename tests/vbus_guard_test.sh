@@ -1,5 +1,5 @@
 #!/bin/sh
-# v1.5.0 external VBUS guard - offline logic test.
+# v1.6.0 external VBUS guard - offline logic test.
 #
 # Runs the real guard code from tab-dp-watchdog/screenvid.sh against a fake
 # sysfs tree, so the four decision paths can be verified on a PC (no tablet,
@@ -101,7 +101,7 @@ setup() {  # setup <usb_online value|MISSING> [guard]
     : > "$STUB_LOG"
 }
 
-echo "=== v1.5.0 VBUS guard: offline logic test ==="
+echo "=== v1.6.0 VBUS guard: offline logic test ==="
 echo "source: $SRC"
 echo
 

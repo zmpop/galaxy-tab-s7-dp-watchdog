@@ -124,7 +124,7 @@ Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.4.0.zip 
 开启"强制息屏超时"时,若检测到前台应用持有 `SCREEN_BRIGHT_WAKE_LOCK`
 (如全屏播放视频)则**不**强制休眠。
 
-## 外部供电守卫:拔掉屏幕 PD 电源不再重启(v1.5.0)
+## 外部供电守卫:拔掉屏幕 PD 电源不再重启(v1.6.0)
 
 **现象**:一线通正常工作,拔掉**屏幕端 PD 供电线**后,平板在数秒~十几秒内直接 panic
 重启(三星安全看门狗复位)。多次复现,`ro.boot.bootreason=kernel_panic,asynchroomus_serror_ilterrupt`,
@@ -149,7 +149,7 @@ RAMDUMP `eRR.p` 中同一签名 4 次(`RWC 80/83/86/89`)。
 
 **修复**:所有会写 `echo 1 > drm_dp/hpd`(或等效重新上流)的路径全部校验外部供电。
 
-| 触发点 | v1.5.0 行为(无外部供电时) |
+| 触发点 | v1.6.0 行为(无外部供电时) |
 |---|---|
 | `screenvid.sh` 亮屏恢复 | 整段跳过,保持 `video_off` 标记(同时抑制主守护的虚拟拔插);只记一条日志 |
 | `screenvid.sh` 主动守卫 | `usb/online` 边沿立刻 `hpd=0`;无供电期间每 3 秒复核,被重新拉活就再按下去 |
@@ -194,7 +194,7 @@ VIDEO_MAX_FAIL=5       # 切断连续失败多少次后自动停用该功能(保
 WAKE_GATE=1            # 1=仅触摸/电源键可亮屏, 0=不限制亮屏来源
 WAKE_GATE_TOUCH=1      # 1=允许触摸点击唤醒(仅 WAKE_GATE=1 时生效)
 TIMEOUT_ENFORCE=1      # 1=系统自动息屏被唤醒锁屏蔽时强制休眠
-VBUS_GUARD=1           # 1=无外部供电时禁止任何"重新上流"动作(v1.5.0, 建议保持 1)
+VBUS_GUARD=1           # 1=无外部供电时禁止任何"重新上流"动作(v1.6.0, 建议保持 1)
 ```
 
 配置文件被修改(含从 Web 界面保存)后,守护进程会在一个轮询周期内自动重新加载。
@@ -219,8 +219,15 @@ Magisk app → 模块 → 本模块 → **「卸载」**按钮 → 重启。v1.2
 **卸载时会发生什么**:
 1. 点击卸载后模块进入"待卸载"状态(重启后生效;此期间可点「还原」撤销);
 2. 重启时 Magisk 删除模块本体(代码、Web 界面、staged 更新),并执行 `uninstall.sh`:
-   - 终止看门狗守护进程、Web 服务(httpd)及超时脚本(若仍在运行);
-   - 删除 `/data/adb/tpdp/`(配置、日志、pid 文件全部清除);
+   - 终止看门狗守护进程、Web 服务(httpd)及超时脚本(若仍在运行)。kill 前先校验
+     `/proc/<pid>/cmdline`,不会误杀复用了旧 PID 的其他进程;
+   - 还原内核侧改动:像素时钟上限恢复内核默认、被钉成 sink-only 的端口恢复 `dual`、
+     DP 视频输出恢复。**最后一步只在 `usb/online=1`(确有外部供电)时执行**,
+     否则保持链路关闭——无供电时强拉 HPD 会让 DP 在平板自身电池上重新上流,
+     正是本模块要防的那条内核 panic 路径;
+   - 删除 `/data/adb/tpdp/`(配置、日志、pid、心跳、`video_off` 等标记全部清除);
+   - 复核 `/data/adb/tpdp*` 是否真的清空,结果打印到 Magisk 安装日志
+     (最后一行应为 `cleanup complete - nothing outside the module dir remains`);
 3. 模块**不创建**数据库、系统注册项、缓存或系统属性,卸载后无任何残留。
    (唯一相关的 `persist.adb.tcp.port` 是无线 ADB 的用户设置,早于本模块存在,
    卸载不触碰;不再需要无线 ADB 可执行 `adb shell su -c 'setprop persist.adb.tcp.port -1'`)
@@ -229,6 +236,7 @@ Magisk app → 模块 → 本模块 → **「卸载」**按钮 → 重启。v1.2
 ```sh
 adb shell su -c 'ls /data/adb/modules/ | grep tab_dp'      # 应无输出
 adb shell su -c 'ls /data/adb/tpdp 2>&1'                   # 应报 No such file
+adb shell su -c 'ls /data/adb/service.d/'                  # 不应出现任何 dp/tpdp 脚本
 adb shell su -c 'cat /sys/class/extcon/extcon0/state'      # DP=1 外接屏仍正常
 adb shell su -c 'pgrep -f tab_dp_watchdog'                 # 应无输出(无残留进程)
 ```

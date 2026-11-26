@@ -27,7 +27,7 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGDIR/log"; }
 # v1.3.0: manual last-resort restore. If the video output is cut while the
 # screen is on (e.g. both daemons were killed by hand), pressing the Magisk
 # action button restores the picture immediately.
-# v1.5.0: refused while external VBUS is absent - forcing HPD high there makes
+# v1.6.0: refused while external VBUS is absent - forcing HPD high there makes
 # the DP link stream over the tablet's own battery, which is the 17:36 panic.
 if [ -f "$LOGDIR/video_off" ]; then
     usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)

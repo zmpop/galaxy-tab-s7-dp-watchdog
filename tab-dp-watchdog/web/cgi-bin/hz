@@ -82,7 +82,7 @@ sed -i '/^HZ_MODE=/d;/^LOCK60=/d' "$CFG" 2>/dev/null
 printf 'HZ_MODE=%s\n' "$mode" >> "$CFG"
 
 # 3) re-enumerate so the framework re-picks a mode within the new limit
-# v1.5.0: skipped when external VBUS is missing - "echo 1 > hpd" would re-stream
+# v1.6.0: skipped when external VBUS is missing - "echo 1 > hpd" would re-stream
 # DP over the tablet's own battery (the 17:36 NoC panic path). The cap itself is
 # already written, so the mode takes effect on the next healthy enumeration.
 note=""
