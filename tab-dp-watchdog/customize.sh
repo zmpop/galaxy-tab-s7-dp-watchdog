@@ -21,6 +21,22 @@ else
   ui_print "- installing on Magisk"
 fi
 
+# ---------------------------------------------------------------------------
+# File modes. This block is not cosmetic - it is the difference between a
+# module that runs and a module that silently does nothing.
+#
+# Magisk / KernelSU / APatch unpack the zip with unzip, which does NOT restore
+# the unix permission bits stored in the archive: every entry lands as 0644
+# (measured on this device: a fresh --install-module left service.sh as
+# -rw-r--r--). The module loader only starts service.sh / post-fs-data.sh when
+# they are executable, so without these chmods the install "succeeds", the
+# dashboard shows the new version, and no daemon ever starts.
+# ---------------------------------------------------------------------------
+for f in service.sh screenvid.sh wakegate.sh action.sh uninstall.sh customize.sh boot-completed.sh post-fs-data.sh; do
+  [ -f "$MODPATH/$f" ] && set_perm "$MODPATH/$f" 0 0 0755
+done
+[ -f "$MODPATH/module.prop" ] && set_perm "$MODPATH/module.prop" 0 0 0644
+
 # web UI: make CGI scripts executable
 if [ -d "$MODPATH/web" ]; then
   set_perm_recursive "$MODPATH/web" 0 0 0755 0644
@@ -29,6 +45,19 @@ if [ -d "$MODPATH/web" ]; then
   done
   [ -f "$MODPATH/web/autoshut.sh" ] && set_perm "$MODPATH/web/autoshut.sh" 0 0 0755
 fi
+
+# v1.9.0: retire files that only existed in older versions. An upgrade keeps
+# whatever the previous install left behind (Magisk replaces the directory, but
+# a direct/zip-over-copy upgrade does not), and a stale powergate.sh from
+# v1.5.x is actively harmful: it drives the port's power role, which is the
+# mechanism that ended up feeding the screen from the tablet's battery.
+for f in powergate.sh; do
+  if [ -f "$MODPATH/$f" ]; then
+    rm -f "$MODPATH/$f"
+    ui_print "- removed obsolete $f (v1.5.x power role governor)"
+  fi
+done
+rm -f /data/adb/tpdp/hb.power 2>/dev/null
 
 # safety: never install over a state where a previous version left the DP
 # video output cut (the external screen would stay black after the reboot).

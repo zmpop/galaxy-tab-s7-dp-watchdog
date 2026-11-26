@@ -188,7 +188,7 @@ TrustZone 收到 SError 后触发安全看门狗复位。
 行为:PD 断电期间外接屏不显示(预期),PD 接回约 3 秒画面自动恢复;息屏/亮屏切换
 在供电正常时行为完全不变。逃生口 `VBUS_GUARD=0`(不推荐)。
 
-## 九、`magisk --install-module` 报 `! Unable to extract zip file!`（本机已复现）
+## 九、`magisk --install-module` 报 `! Unable to extract zip file!`（v1.9.0 定案：归档结构错误）
 
 ### 现象
 
@@ -198,13 +198,55 @@ adb shell su -c 'magisk --install-module /sdcard/Download/tab-dp-watchdog-v1.6.0
 ! Unable to extract zip file!
 ```
 
-**不是安装包的问题。** 用官方未改动的 v1.4.0 release 包复现同样报错；而 busybox 用安装器的原样参数
-`unzip -o "$ZIP" -x 'META-INF/*' -d $TMP` 能完整解出 16 个文件。给 PATH 加 `unzip` shim 也无效。
+**已定案（v1.9.0）：错判在这里。** 当时写下的结论是「本机 CLI 安装器坏了」，
+换 v1.4.0 官方包也报同一个错，于是有了 `deploy_direct.sh` 这条绕路。
+真实原因是**归档结构**：
 
-结论：这台机器（Magisk `28.1:MAGISK:R` / SM-T970）的 **CLI 安装器路径**自身有问题。Magisk App 里
-「从本地安装」走的是另一条路径（App 侧解压后交给 magiskd），不受影响。
+```bash
+unzip -l tab-dp-watchdog-v1.6.0.zip | head -3
+#  tab-dp-watchdog/module.prop      <- 多了一层目录
+#  tab-dp-watchdog/service.sh
+```
 
-### 绕法：直接部署（等价，已验证）
+`tools/build.py` 当时用 `os.path.relpath(p, ROOT)` 算归档内路径，把仓库里的
+`tab-dp-watchdog/` 这一层也打进去了。安装器解压完找 `./module.prop`，只找到一个
+同名目录，于是报「无法解压」——**任何**包都会失败，包括官方包（官方包被
+`deploy_direct.sh` 那套流程重新打过一次，同样带上了前缀）。
+
+修复后的正确结构，以及构建时的自检：
+
+```bash
+python3 tools/build.py
+#  layout: root module.prop + META-INF/com/google/android/update-binary (0755)
+unzip -l dist/tab-dp-watchdog-v1.9.0.zip | head -4
+#  module.prop
+#  service.sh
+#  META-INF/com/google/android/update-binary
+```
+
+v1.9.0 起 `build.py` 会拒绝产出不符合结构的包：根级 `module.prop` 缺失、必需文件
+缺失、出现 `tab-dp-watchdog/` 前缀、`update-binary` 没有执行位，任一命中即 `SystemExit`。
+
+### 第二个坑：装上了但一个守护都不起
+
+`unzip` 不还原 zip 里记录的权限位，解压后所有文件都是 `0644`：
+
+```
+-rw-r--r-- 1 root root 21075 service.sh     # 面具不会拉起它
+```
+
+表现为：模块列表里版本号已经是新版，`/data/adb/tpdp/log` 却一行新日志也没有。
+v1.9.0 在 `customize.sh` 开头显式 `chmod 0755`，并且在 zip 内就把
+`web/cgi-bin/*` 存成 `0755`（即使 `customize.sh` 没跑，Web 界面也不会 404）。
+
+装完自查：
+
+```bash
+adb shell su -c 'ls -l /data/adb/modules/tab_dp_watchdog/*.sh'   # 必须 rwxr-xr-x
+adb shell su -c 'tail -5 /data/adb/tpdp/log'                     # 必须出现 ===== service vX.Y.Z started
+```
+
+### 手动兜底（无面具环境仍然可用）
 
 ```bash
 adb push tab-dp-watchdog-v1.6.0.zip /sdcard/Download/

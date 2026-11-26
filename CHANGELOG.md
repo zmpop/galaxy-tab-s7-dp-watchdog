@@ -3,6 +3,54 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.9.0
+
+### 修复：这个包从来就不是一个合法的面具模块
+
+**现象**：把模块 zip 交给面具（Magisk app）安装，任何版本都报
+`Unable to extract zip file`；换官方 v1.4.0 的包也一样，于是当时判断成
+「本机 magisk CLI 坏了」，改用 `tools/deploy_direct.sh` 手动解压部署。
+
+**真正原因**：`tools/build.py` 用 `os.path.relpath(p, ROOT)` 计算归档内路径，
+于是 zip 里是
+
+```
+tab-dp-watchdog/module.prop
+tab-dp-watchdog/service.sh
+```
+
+而面具解压后找的是**根级** `./module.prop`，找不到就报「无法解压」。
+包结构本身不是模块，跟 CLI 一点关系都没有。
+
+### 修复：装上了也不会启动
+
+`unzip` 解压时**不还原** zip 里记录的权限位，所有文件落地都是 `0644`
+（真机实测：`--install-module` 后 `service.sh` 是 `-rw-r--r--`）。
+面具只在脚本可执行时才拉起 `service.sh`，所以「安装成功、版本号也变了、
+但一个守护都没起」——这是第二个坑，被第一个坑挡住了没暴露出来。
+
+### 变更
+
+| 文件 | 改动 |
+|---|---|
+| `META-INF/com/google/android/update-binary` | **新增**。完整安装器：校验 id、解压（排除 `META-INF`）、source `customize.sh`、回写权限，兼容 Magisk / KernelSU / APatch / TWRP |
+| `META-INF/com/google/android/updater-script` | **新增**，内容 `#MAGISK` |
+| `tools/build.py` | 归档根改为 `SRC` 相对路径（不再带 `tab-dp-watchdog/` 前缀）；构建后自检：根级 `module.prop` 存在、必需文件齐全、无目录前缀、`update-binary` 带执行位、`id=` 可解析 |
+| `customize.sh` | 显式把 `*.sh` 设为 `0755`（unzip 不还原权限位）；升级时删除 v1.5.x 的 `powergate.sh` 与 `hb.power`（它会主动驱动端口 power role，正是「拔 PD 后平板继续给屏供电」的元凶） |
+| `web/cgi-bin/*` | 归档内直接给 `0755`，即使安装器没跑 `customize.sh`，Web 界面也不会 404 |
+
+### 安装方式（回归标准流程）
+
+面具 app → 模块 → 从本地安装 → 选 `tab-dp-watchdog-v1.9.0.zip` → 重启。
+不再需要 `deploy_direct.sh`（保留作为无面具环境的手动兜底）。
+
+## v1.8.1
+
+- 判活改用 `dp_debug pclock > 0`：`status=connected + enabled` 在黑屏时依然成立，会骗过守护进程。
+- `hpd=0` 实测为空操作（`rc=0`、零状态变化、零内核日志），所有「拉低 HPD」路径删除。
+- PD 回来不立即恢复：`PD_SETTLE=4` 秒等协商结束，且 `usb/online=1` 须连续 3 次采样（`VBUS_OK_STRIKES`）才算供电回来——写入 `port_type` 期间 VBUS 会 1→0→1 抖动，此时上流正是 19:18 那次黑屏的原因。
+- `SINK_GATE` 默认关闭：实测钉 `sink` 并不能停掉 5V（内核重新装回 Source，继续供 1.3–1.5A 达 48 秒，比原厂自然翻转的 ~25 秒更差），只会反复撕链路。保留开关供实验。
+
 ## v1.8.0
 
 ### 修复（v1.7.0 的遗漏：屏幕不断电）

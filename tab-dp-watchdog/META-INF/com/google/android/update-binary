@@ -1,0 +1,133 @@
+#!/sbin/sh
+##########################################################################
+#  Magisk / KernelSU / APatch module installer shim
+#
+#  Why this file exists:
+#    A flashable module zip is only recognised when the archive has
+#    META-INF/com/google/android/update-binary at its ROOT and module.prop at
+#    its ROOT. Without them the Magisk app answers "Unable to extract zip file"
+#    because after unpacking it looks for ./module.prop and finds nothing.
+#
+#  Behaviour:
+#    * Magisk app / KernelSU / APatch  -> normally unpack the zip themselves and
+#      source customize.sh. If they do execute this file, MODPATH is already set
+#      by their installer; we only finish the job (perms, cleanup, ui output).
+#    * TWRP / OrangeFox (update-binary is executed with 3 args) -> this shim
+#      creates the staging dir, unpacks, runs customize.sh, then lets the next
+#      boot move modules_update/* into modules/*.
+#
+#  argv: $1 = api version, $2 = output fd, $3 = zip path
+##########################################################################
+
+umask 022
+
+OUTFD="$2"
+ZIPFILE="$3"
+
+# ---- ui plumbing -------------------------------------------------------
+# Magisk's own installer defines these before sourcing customize.sh; in
+# recovery we have to provide them ourselves.
+if ! command -v ui_print >/dev/null 2>&1; then
+  ui_print() {
+    if [ -n "$OUTFD" ] && [ -e "/proc/self/fd/$OUTFD" ]; then
+      echo "ui_print $*" >&"$OUTFD"
+      echo "ui_print" >&"$OUTFD"
+    else
+      echo "$*"
+    fi
+  }
+fi
+
+if ! command -v abort >/dev/null 2>&1; then
+  abort() {
+    ui_print "! $*"
+    ui_print "! Installation aborted"
+    exit 1
+  }
+fi
+
+if ! command -v set_perm >/dev/null 2>&1; then
+  set_perm() {
+    chown "$1:$2" "$5" 2>/dev/null
+    chmod "$3" "$5" 2>/dev/null
+  }
+fi
+
+if ! command -v set_perm_recursive >/dev/null 2>&1; then
+  set_perm_recursive() {
+    find "$5" -type d 2>/dev/null | while read -r d; do
+      chown "$1:$2" "$d" 2>/dev/null
+      chmod "$3" "$d" 2>/dev/null
+    done
+    find "$5" -type f 2>/dev/null | while read -r f; do
+      chown "$1:$2" "$f" 2>/dev/null
+      chmod "$4" "$f" 2>/dev/null
+    done
+  }
+fi
+
+# ---- resolve the staging path -----------------------------------------
+# Magisk:   /data/adb/modules_update/<id>
+# KernelSU: /data/adb/modules_update/<id>   (same layout)
+# The id is read from module.prop inside the zip, never hard-coded, so a
+# renamed module cannot end up installing into a stale directory.
+if [ -z "$MODPATH" ]; then
+  [ -n "$ZIPFILE" ] || abort "no zip path given (argv: $*)"
+  [ -f "$ZIPFILE" ] || abort "zip not found: $ZIPFILE"
+
+  _tmp="/data/adb/modules_update"
+  mkdir -p "$_tmp" 2>/dev/null || abort "cannot create $_tmp"
+
+  # pull only module.prop first to learn the id
+  _id=$(unzip -p "$ZIPFILE" module.prop 2>/dev/null | sed -n 's/^id=//p' | head -n 1)
+  [ -n "$_id" ] || abort "module.prop missing at zip root (not a valid module archive)"
+  case "$_id" in
+    *[!a-zA-Z0-9._-]*) abort "illegal module id: $_id" ;;
+  esac
+
+  MODPATH="$_tmp/$_id"
+  rm -rf "$MODPATH"
+  mkdir -p "$MODPATH" || abort "cannot create $MODPATH"
+
+  ui_print "- Unpacking module archive"
+  # META-INF is installer machinery, it must never land in the module dir
+  unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >/dev/null 2>&1 \
+    || abort "unzip failed"
+fi
+
+[ -f "$MODPATH/module.prop" ] || abort "module.prop not found after unpack"
+MODID=$(sed -n 's/^id=//p' "$MODPATH/module.prop" | head -n 1)
+MODVER=$(sed -n 's/^version=//p' "$MODPATH/module.prop" | head -n 1)
+ui_print "- Module: $MODID $MODVER"
+
+# ---- install-time hook -------------------------------------------------
+if [ -f "$MODPATH/customize.sh" ]; then
+  ui_print "- Running customize.sh"
+  # shellcheck disable=SC1091
+  . "$MODPATH/customize.sh"
+else
+  # sensible defaults when a module ships no customize.sh
+  set_perm_recursive "$MODPATH" 0 0 0755 0644
+  for f in service.sh post-fs-data.sh uninstall.sh boot-completed.sh; do
+    [ -f "$MODPATH/$f" ] && set_perm "$MODPATH/$f" 0 0 0755
+  done
+fi
+
+# ---- mandatory post-processing ----------------------------------------
+# Magisk refuses to execute a module script that is not 0755, and the module
+# directory tree must not be group/world-writable.
+[ -f "$MODPATH/module.prop" ] || abort "module.prop vanished during install"
+set_perm "$MODPATH/module.prop" 0 0 0644
+for f in service.sh post-fs-data.sh uninstall.sh boot-completed.sh action.sh; do
+  [ -f "$MODPATH/$f" ] && set_perm "$MODPATH/$f" 0 0 0755
+done
+[ -d "$MODPATH/web" ] && set_perm_recursive "$MODPATH/web" 0 0 0755 0644
+
+# A stale "disable" flag from an earlier install would silently park the new
+# version. Magisk's own flag file is fine to clear here: the user is installing.
+rm -f "$MODPATH/disable" 2>/dev/null
+
+ui_print "- Done. Reboot to activate."
+
+# TWRP ends the install by itself once this script returns 0.
+exit 0
