@@ -28,6 +28,9 @@ if [ "${VBUS_GUARD:-1}" = "1" ] && [ -n "$usb_online" ] && [ "$usb_online" != "1
 fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') web: manual recover requested from web UI" >> "$LOGDIR/log"
+# v1.8.0: the sink gate must be dropped before the replug, otherwise the dual
+# write below would race the gate's re-pin and the picture stays black.
+rm -f "$LOGDIR/sink_gate" "$LOGDIR/sink_gate.ts" 2>/dev/null
 echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
 sleep 2
 echo dual > "$TYPEC_PORT/port_type" 2>/dev/null

@@ -12,9 +12,13 @@
 # placement is functionally identical to what the installer would produce.
 
 set -u
-Z=/sdcard/Download/tab-dp-watchdog-v1.6.0.zip
+# zip name is derived from module.prop in this checkout, so a version bump does
+# not silently deploy yesterday's package
+VER=$(grep '^version=' "$(dirname "$0")/../tab-dp-watchdog/module.prop" 2>/dev/null | cut -d= -f2)
+[ -n "${VER:-}" ] || VER=v1.7.0
+Z=${1:-/sdcard/Download/tab-dp-watchdog-$VER.zip}
 DEST=/data/adb/modules/tab_dp_watchdog
-TMP=/data/local/tmp/inst160
+TMP=/data/local/tmp/inst_deploy
 
 say() { echo "[install] $*"; }
 

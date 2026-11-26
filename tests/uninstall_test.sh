@@ -9,7 +9,8 @@
 #
 # Verifies the three holes fixed in v1.6.0:
 #   - HPD is only forced high with real external VBUS (no panic path on removal)
-#   - port_type is rewritten to dual only when pinned to sink
+#   - port_type is always rewritten to dual (v1.8.0: the gate read-back
+#     lies, so a conditional restore could strand a sink-only port)
 #   - a stale/reused web.pid is not blindly killed
 # and that the module data directory is removed.
 
@@ -64,7 +65,7 @@ check "script exits 0"                       '[ "$rc" -eq 0 ]'
 check "HPD forced high"                      '[ "$(cat "$HPD")" = "1" ]'
 check "tpdp removed"                         '[ ! -d "$TMP/adb/tpdp" ]'
 check "pclk restored from saved pclk_org"    '[ "$(cat "$PCLK")" = "300000" ]'
-check "healthy port_type left alone"         '[ "$(cat "$PORT")" = "[dual] source sink" ]'
+check "port_type normalised to dual"         '[ "$(cat "$PORT")" = "dual" ]'
 check "reports cleanup complete"             'grep -q "cleanup complete" "$TMP/out1.txt"'
 echo
 
@@ -90,7 +91,7 @@ echo "T4  port_type=[sink] only -> restored to dual"
 setup 1 '[sink]'
 sh "$TMP/un.sh" > "$TMP/out4.txt" 2>/dev/null
 check "port_type rewritten to dual"          '[ "$(cat "$PORT")" = "dual" ]'
-check "reported in output"                   'grep -q "port_type restored" "$TMP/out4.txt"'
+check "reported in output"                   'grep -q "port_type=dual (gate released)" "$TMP/out4.txt"'
 echo
 
 # ---- T5: stale web.pid must not kill an unrelated process ---------------

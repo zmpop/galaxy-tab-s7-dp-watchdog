@@ -66,7 +66,9 @@ PCLK_120_KHZ=560000    # 120Hz-class pixel clock cap; 120Hz mode needs 537MHz
 WAKE_GATE=1            # 1 = only touchscreen tap / power key may light the screen
 WAKE_GATE_TOUCH=1      # 1 = touchscreen tap is allowed to wake (needs WAKE_GATE=1)
 TIMEOUT_ENFORCE=1      # 1 = force the system screen-off timeout to take effect
-VBUS_GUARD=1           # v1.6.0: 1 = never force HPD high without external VBUS
+VBUS_GUARD=1           # 1 = never touch the DP link while external VBUS is absent
+PD_SETTLE=4            # v1.7.0: seconds to let the PD contract settle before recovering
+SINK_GATE=0            # v1.8.1: default OFF (see screenvid.sh - pinning sink does not cut VBUS)
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
@@ -110,6 +112,24 @@ ext_vbus_ok() {
     [ -z "$u" ] && return 0          # node absent -> cannot judge, never block
     [ "$u" = "1" ] && return 0
     return 1
+}
+
+# ---------- v1.8.0: sink gate (owned by screenvid.sh) ----------
+# screenvid pins port_type=sink while external VBUS is absent so the tablet
+# cannot feed the screen from its own battery. The marker is the shared state;
+# this daemon must not write dual while it exists (that is exactly what
+# re-enables the 5V output) and must release it if the power comes back while
+# screenvid is down - a sink-only port can never charge.
+GATE_MARKER=$LOGDIR/sink_gate
+GATE_TS=$LOGDIR/sink_gate.ts
+GATE_RELEASE=$LOGDIR/sink_gate.release
+gate_is_on() { [ -f "$GATE_MARKER" ]; }
+
+gate_release() {
+    rm -f "$GATE_MARKER" "$GATE_TS" 2>/dev/null
+    echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
+    date +%s > "$GATE_RELEASE" 2>/dev/null
+    log "sink gate: released ($1) -> port_type=dual"
 }
 
 vbus_evidence() {
@@ -237,7 +257,7 @@ boot_video_failsafe() {
             # v1.6.0: booting while the screen has no PD supply. Forcing HPD
             # here would stream over the tablet's own battery - leave it down
             # and let screenvid restore once power appears.
-            log "boot: link down with a partner attached but NO external VBUS ($(vbus_evidence)) - HPD left LOW (v1.6.0 guard)"
+            log "boot: link down with a partner attached but NO external VBUS ($(vbus_evidence)) - hands off: no hpd/port_type writes, kernel owns the teardown (v1.7.0)"
             return 0
         fi
         echo 1 > "$HPD_NODE" 2>/dev/null
@@ -271,6 +291,13 @@ virtual_replug() {
     # Without external VBUS that is the panic path - refuse instead of looping.
     if ! ext_vbus_ok; then
         log "action refused: no external VBUS ($(vbus_evidence)) - a replug would re-stream DP on the tablet's own 5V"
+        return 1
+    fi
+    # v1.8.0: while the sink gate is up the port is deliberately sink-only. A
+    # replug would write dual, hand the Source capability back and let the
+    # tablet feed the screen again - the whole point of the gate.
+    if gate_is_on; then
+        log "action refused: sink gate engaged (screen has no PD supply) - releasing the gate first"
         return 1
     fi
     log "action: virtual replug (port_type sink -> dual)"
@@ -314,6 +341,24 @@ while true; do
     date +%s > "$LOGDIR/hb.main"
     start_screenvid
     start_wakegate
+
+    # ---- v1.8.0: sink-gate safety net ----
+    # A sink-only port cannot charge. If VBUS is present while the gate marker
+    # is still up (screenvid died mid-episode, or the PD came back between two
+    # of its polls) release it here: charging and DP matter more than the gate.
+    if gate_is_on; then
+        if ext_vbus_ok; then
+            gate_back=$(( ${gate_back:-0} + 1 ))
+            if [ "$gate_back" -ge 2 ]; then
+                gate_back=0
+                gate_release "external VBUS is present (service safety net)"
+            fi
+        else
+            gate_back=0
+        fi
+    else
+        gate_back=0
+    fi
 
     # hot-reload config if it changed (e.g. saved from the web UI)
     if [ -f "$LOGDIR/config" ]; then
@@ -366,7 +411,11 @@ while true; do
         log "video_off marker stale (${vage}s, screen ${wakefulness:-unknown}) -> clearing, restoring video"
         rm -f "$LOGDIR/video_off"
         if ext_vbus_ok; then
-            [ -e "$HPD_NODE" ] && echo 1 > "$HPD_NODE" 2>/dev/null
+            # v1.7.0: hpd=1 only re-configures an already-connected link; it does
+            # not re-enable the encoder (measured). Recovery belongs to
+            # screenvid's ladder (port_type replug -> hpd -> screen bounce), so
+            # do not poke hpd here - a stray poke is what broke the picture.
+            log "  (marker cleared; screenvid owns the re-enable - no hpd poke)"
         else
             log "  (HPD left LOW: no external VBUS - $(vbus_evidence))"
         fi
@@ -417,7 +466,18 @@ while true; do
     fi
     if [ "$vbus_blocked" = "1" ]; then
         vbus_blocked=0
-        log "external VBUS back - recovery re-armed"
+        vbus_ready=$(( $(date +%s) + PD_SETTLE ))
+        log "external VBUS back - recovery re-armed in ${PD_SETTLE}s (PD contract settling)"
+    fi
+    # v1.7.0: never strike while the PD contract is still being re-negotiated.
+    # A replug injected into that window is exactly what left the sink black
+    # (status=enabled, pclock=0) on 2026-11-26 19:18 with v1.6.0.
+    if [ "${vbus_ready:-0}" != "0" ]; then
+        if [ "$(date +%s)" -lt "${vbus_ready:-0}" ]; then
+            strike=0
+            continue
+        fi
+        vbus_ready=0
     fi
 
     strike=$((strike + 1))

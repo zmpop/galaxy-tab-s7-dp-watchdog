@@ -38,6 +38,13 @@ if [ -f "$LOGDIR/video_off" ]; then
         echo "请先接上外接屏的 PD 电源，画面会自动恢复（约 3 秒），或接好后再点一次「执行」。"
     else
         log "action: cut marker present, forcing DP video output on"
+        # v1.8.0: drop the sink gate first, otherwise the port stays sink-only
+        # and no amount of HPD poking can bring the link (or the picture) back.
+        if [ -f "$LOGDIR/sink_gate" ]; then
+            rm -f "$LOGDIR/sink_gate" "$LOGDIR/sink_gate.ts" 2>/dev/null
+            echo dual > /sys/class/typec/port0/port_type 2>/dev/null
+            log "action: sink gate released (port_type=dual)"
+        fi
         [ -e /sys/kernel/debug/drm_dp/hpd ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
         [ -e /sys/kernel/debug/drm_dp/hpd ] && echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
         rm -f "$LOGDIR/video_off"

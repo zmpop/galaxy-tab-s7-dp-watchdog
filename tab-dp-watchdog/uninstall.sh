@@ -59,14 +59,21 @@ if [ -f /data/adb/tpdp/web.pid ]; then
     fi
 fi
 
-# 1b) un-pin a sink-only port left behind by the (now removed) power governor,
-#     otherwise the external screen would stay black after this reboot.
+# 1b) release the sink gate and un-pin the port. CRITICAL: the v1.8.0 gate
+#     pins port_type=sink while the screen has no PD supply, and the sysfs
+#     read-back still prints "[dual] source sink" in that state (measured), so
+#     a conditional restore based on the read-back would silently leave a
+#     sink-only port behind - the tablet could then never charge again.
+#     Writing dual is the factory state and is idempotent, so do it always.
 if [ -e "$PORT" ]; then
-    case "$(cat "$PORT" 2>/dev/null)" in
-        *'[sink]'*) echo dual > "$PORT" 2>/dev/null
-                    note "port_type restored to dual" ;;
-    esac
+    _pt_before=$(cat "$PORT" 2>/dev/null)
+    if echo dual > "$PORT" 2>/dev/null; then
+        note "port_type=dual (gate released) - was: $_pt_before"
+    else
+        note "WARNING: could not write $PORT - check the port manually"
+    fi
 fi
+rm -f /data/adb/tpdp/sink_gate /data/adb/tpdp/sink_gate.ts 2>/dev/null
 
 # 1c) restore the DP pixel clock limit if the refresh selector capped it, so
 #     high-bandwidth modes (120Hz) become selectable again.

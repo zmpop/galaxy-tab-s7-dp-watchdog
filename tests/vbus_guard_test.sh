@@ -1,10 +1,15 @@
 #!/bin/sh
-# v1.6.0 external VBUS guard - offline logic test.
+# DP link guard - offline logic test (v1.7.0 semantics).
 #
-# Runs the real guard code from tab-dp-watchdog/screenvid.sh against a fake
-# sysfs tree, so the four decision paths can be verified on a PC (no tablet,
-# no root, no debugfs). The functions are extracted verbatim from the shipped
-# script - if they drift, this test fails.
+# Runs the real functions from tab-dp-watchdog/screenvid.sh against a fake sysfs
+# tree. No tablet, no root, no debugfs.
+#
+# v1.7.0 rewrite. The old suite asserted "restore must force HPD high" - that is
+# exactly the behaviour that broke the picture on hardware: hpd=1 injected into
+# the PD re-negotiation window leaves status=enabled with pclock=0 and a black
+# sink. The invariants are inverted here, and every write the daemon performs is
+# captured through an echo() wrapper so the *order* of the repair ladder can be
+# asserted (FIFOs were tried first but they block on read and need seeding).
 #
 #   sh tests/vbus_guard_test.sh
 #
@@ -12,178 +17,213 @@
 
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-SRC="$HERE/../tab-dp-watchdog/screenvid.sh"
-[ -f "$SRC" ] || { echo "FATAL: $SRC not found"; exit 1; }
+SV="$HERE/../tab-dp-watchdog/screenvid.sh"
+SE="$HERE/../tab-dp-watchdog/service.sh"
+[ -f "$SV" ] || { echo "FATAL: $SV not found"; exit 1; }
+[ -f "$SE" ] || { echo "FATAL: $SE not found"; exit 1; }
 
-# NOTE: a fixed /tmp path is used on purpose - mktemp returns a Windows-style
-# path ("C:\...\Temp/xxx") under Git Bash, which some rm wrappers refuse.
-TMP="/tmp/vbus_guard_test.$$"
+# fixed path: mktemp returns a Windows-style path under Git Bash, which some rm
+# wrappers refuse; never rm -rf the tree here either (the wrapper kills the shell)
+TMP="/tmp/dpguard_$$_$(date +%s)"
 mkdir -p "$TMP/sys/power_supply/usb" "$TMP/sys/power_supply/otg" \
-         "$TMP/sys/power_supply/battery" "$TMP/sys/typec/port0" "$TMP/state"
+    "$TMP/sys/power_supply/battery" "$TMP/sys/typec/port0" "$TMP/state"
 
-# fake sysfs nodes used by vbus_evidence()
-DATAROLE_FILE="$TMP/sys/typec/port0/data_role"
-printf 'dual\n'        > "$TMP/sys/typec/port0/port_type"
-printf '[sink] source\n' > "$TMP/sys/typec/port0/power_role"
-printf '0\n'           > "$TMP/sys/power_supply/otg/online"
-printf '%s\n' 300      > "$TMP/sys/power_supply/battery/current_now"
-
-# ---- extract the guard + restore_video from the shipped script ------------
-extract() {  # extract <funcname>
-    awk -v fn="$1" '
-        $0 ~ ("^" fn "\\(\\) \\{") { inside = 1 }
-        inside { print }
-        inside && /^}$/ { exit }
-    ' "$SRC"
-}
-HAS_GUARD_EXT=$(extract ext_vbus_ok)
-HAS_GUARD_EV=$(extract vbus_evidence)
-HAS_RESTORE=$(extract restore_video)
-for v in HAS_GUARD_EXT HAS_GUARD_EV HAS_RESTORE; do
-    eval "body=\$$v"
-    [ -n "$body" ] || { echo "FATAL: could not extract $v - did screenvid.sh change shape?"; exit 1; }
-done
-
-# ---- harness --------------------------------------------------------------
 EXT_VBUS="$TMP/sys/power_supply/usb/online"
 OTG_ONLINE="$TMP/sys/power_supply/otg/online"
 POWER_ROLE="$TMP/sys/typec/port0/power_role"
 BAT_CUR="$TMP/sys/power_supply/battery/current_now"
 TYPEC_PORT="$TMP/sys/typec/port0"
 HPD_NODE="$TMP/state/hpd"
+DP_DEBUG="$TMP/state/dp_debug"
 STATE_FILE="$TMP/state/video.state"
 MARKER="$TMP/state/video_off"
 STUB_LOG="$TMP/state/log"
-STUB_LINK=1
+ECHOLOG="$TMP/state/echo.log"
+INPUTLOG="$TMP/state/input.log"
+
+printf '[sink] source\n' > "$POWER_ROLE"
+printf '0\n'             > "$OTG_ONLINE"
+printf '300\n'           > "$BAT_CUR"
+: > "$HPD_NODE"
+
+# ---- extract functions verbatim from the shipped script -------------------
+extract() {
+    awk -v fn="$1" '
+        $0 ~ ("^" fn "\\(\\) \\{") { inside = 1 }
+        inside { print }
+        inside && /^}$/ { exit }
+    ' "$SV"
+}
+for f in ext_vbus_ok vbus_evidence dp_pclk video_real_streaming restore_video; do
+    body=$(extract "$f")
+    [ -n "$body" ] || { echo "FATAL: could not extract $f - did screenvid.sh change shape?"; exit 1; }
+    eval "$body"
+done
+
+# ---- harness --------------------------------------------------------------
 VBUS_GUARD=1
+PD_REPAIR=1
 vbus_notice=0
 vbus_wait=0
-: > "$HPD_NODE"; : > "$STUB_LOG"
+STUB_ON=0
 
-log() { echo "$*" >> "$STUB_LOG"; }
-link_present() { [ "$STUB_LINK" = "1" ]; }
-ensure_hpd() { [ -e "$HPD_NODE" ]; }
-partner_present() { [ "$STUB_LINK" = "1" ]; }
-cable_present() { [ "$STUB_LINK" = "1" ]; }
-refresh_actual() {
-    if [ "$(cat "$HPD_NODE" 2>/dev/null)" = "1" ]; then
-        ACT_ST=connected; ACT_EN=enabled
-    else
-        ACT_ST=disconnected; ACT_EN=disabled
-    fi
+# capture link writes: the daemon only ever writes 0/1 to hpd and sink/dual to
+# port_type, so those four tokens identify every poke it makes, in order
+echo() {
+    case "${1:-}" in
+        0|1|sink|dual) printf '%s\n' "$1" >> "$ECHOLOG" ;;
+    esac
+    command echo "$@"
 }
-video_actual_on()  { [ "$ACT_ST" = "connected" ] && [ "$ACT_EN" = "enabled" ]; }
-video_actual_off() { [ "$ACT_ST" = "disconnected" ] && [ "$ACT_EN" = "disabled" ]; }
-# restore_video's HPD loop sleeps 2s per attempt - collapse it for the test
+# silence the daemon's own chatter, keep it assertable
+log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
+link_present()    { [ "${STUB_LINK:-1}" = "1" ]; }
+partner_present() { [ "${STUB_LINK:-1}" = "1" ]; }
+cable_present()   { [ "${STUB_LINK:-1}" = "1" ]; }
+ensure_hpd()      { [ -e "$HPD_NODE" ]; }
+refresh_actual()  { ACT_ST=connected; ACT_EN=enabled; }
+# STUB_ON: 1 = already streaming, 0 = never comes up, afterreplug = comes up
+# once the daemon has written the sink->dual replug (that is how the real
+# kernel behaves: the virtual replug is what re-enumerates this link)
+video_actual_on() {
+    case "$STUB_ON" in
+        1)           return 0 ;;
+        afterreplug) grep -qx 'dual' "$ECHOLOG" 2>/dev/null ;;
+        *)           return 1 ;;
+    esac
+}
 sleep() { :; }
-
-eval "$HAS_GUARD_EXT"
-eval "$HAS_GUARD_EV"
-eval "$HAS_RESTORE"
+input() { printf '%s\n' "$*" >> "$INPUTLOG"; }
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+# writes, in order, as a single space-separated string
+writes() { cat "$ECHOLOG" 2>/dev/null | tr '\n' ' '; }
+hpd_writes() { grep -c '^[01]$' "$ECHOLOG" 2>/dev/null || echo 0; }
 
-setup() {  # setup <usb_online value|MISSING> [guard]
+setup() {  # setup <usb_online|MISSING> [guard] [STUB_ON]
     rm -f "$EXT_VBUS"
-    case "$1" in
-        MISSING) : ;;
-        *) printf '%s\n' "$1" > "$EXT_VBUS" ;;
-    esac
+    [ "$1" = "MISSING" ] || printf '%s\n' "$1" > "$EXT_VBUS"
     VBUS_GUARD=${2:-1}
+    STUB_ON=${3:-0}
     STUB_LINK=1
-    vbus_notice=0
-    vbus_wait=0
-    echo 0 > "$HPD_NODE"
+    vbus_notice=0; vbus_wait=0
     rm -f "$MARKER" "$STATE_FILE"
-    : > "$STUB_LOG"
+    printf 'dual' > "$TYPEC_PORT/port_type"
+    : > "$HPD_NODE"
+    : > "$ECHOLOG"; : > "$INPUTLOG"; : > "$STUB_LOG"
 }
 
-echo "=== v1.6.0 VBUS guard: offline logic test ==="
-echo "source: $SRC"
+echo "=== DP link guard, v1.7.0 semantics ==="
+echo "source: $SV"
 echo
 
-# ---- T1: external power present -> normal restore -------------------------
-echo "T1  usb/online=1 (screen PD connected) -> restore allowed"
-setup 1
-restore_video; rc=$?
-check "restore_video succeeds (rc=0)"    '[ "$rc" -eq 0 ]'
-check "HPD was forced high"              '[ "$(cat "$HPD_NODE")" = "1" ]'
-check "marker cleared"                   '[ ! -f "$MARKER" ]'
-check "state=on"                         '[ "$(cat "$STATE_FILE")" = "on" ]'
-check "vbus_wait cleared"                '[ "$vbus_wait" = "0" ]'
+# ---- A. real video_real_streaming() / dp_pclk()---------------------------
+echo "A  video_real_streaming(): pclock is the truth, status/enabled are not"
+printf '\tstate=0xa5\n\tresolution=2560x1600@60Hz\n\tpclock=268500KHz\n' > "$DP_DEBUG"
+check "pclk parsed (268500)"                '[ "$(dp_pclk)" = "268500" ]'
+check "streaming detected"                  'video_real_streaming'
+printf '\tstate=0xa5\n\tresolution=0x0@0Hz\n\tpclock=0KHz\n' > "$DP_DEBUG"
+check "pclk=0 -> NOT streaming"             '! video_real_streaming'
+check "this is the exact black-screen state (enabled but pclk 0)" '[ "$(cat "$DP_DEBUG" | grep -c pclock=0)" = "1" ]'
+rm -f "$DP_DEBUG"
+check "node absent -> do not block (trust status)" 'video_real_streaming'
+printf 'garbage without the field\n' > "$DP_DEBUG"
+check "unparsable -> do not block"          'video_real_streaming'
 echo
 
-# ---- T2: no external power -> restore MUST be suppressed ------------------
-echo "T2  usb/online=0 (screen PD pulled, tablet sourcing) -> restore blocked"
-setup 0
+# ---- B1. already streaming + VBUS ok -> NO writes at all ----------------
+echo "B1 VBUS ok + already streaming -> hands off (the v1.6.0 regression)"
+setup 1 1 1
 restore_video; rc=$?
-check "restore_video returns 0 (handled)" '[ "$rc" -eq 0 ]'
-check "HPD stayed LOW (never 1)"          '[ "$(cat "$HPD_NODE")" != "1" ]'
-check "marker set (suppresses service.sh)" '[ -f "$MARKER" ]'
-check "state=off"                          '[ "$(cat "$STATE_FILE")" = "off" ]'
-check "vbus_wait=1 (3s fast retry)"        '[ "$vbus_wait" = "1" ]'
-check "log mentions SUPPRESSED"            'grep -q "restore SUPPRESSED" "$STUB_LOG"'
-# second call must not spam the log (edge-triggered notice)
+check "rc=0"                                '[ "$rc" -eq 0 ]'
+check "nothing written to hpd"              '[ -z "$(writes)" ]'
+check "no input/keyevent"                   '[ ! -s "$INPUTLOG" ]'
+echo
+
+# ---- B2. VBUS absent -> suppress, and still write NOTHING ---------------
+echo "B2 VBUS absent (PD pulled) -> suppressed, zero link writes"
+setup 0 1 0
+restore_video; rc=$?
+check "rc=0 (handled, not an error)"        '[ "$rc" -eq 0 ]'
+check "nothing written to hpd/port_type"    '[ -z "$(writes)" ]'
+check "marker set"                          '[ -f "$MARKER" ]'
+check "state=off"                           '[ "$(cat "$STATE_FILE")" = "off" ]'
+check "vbus_wait=1 (fast retry)"            '[ "$vbus_wait" = "1" ]'
+check "log says SUPPRESSED"                 'grep -q "restore SUPPRESSED" "$STUB_LOG"'
 restore_video
-check "notice logged only once"            '[ "$(grep -c "restore SUPPRESSED" "$STUB_LOG")" = "1" ]'
+check "notice logged once only"             '[ "$(grep -c "restore SUPPRESSED" "$STUB_LOG")" = "1" ]'
 echo
 
-# ---- T3: node missing (installer context) -> never block ------------------
-echo "T3  usb/online node missing (installer/uninstaller) -> do not block"
-setup MISSING
+# ---- B3. VBUS ok, dark: replug is rung 1 and it fixes the link ----------
+echo "B3 VBUS ok + sink dark -> port_type replug first, hpd never touched"
+setup 1 1 afterreplug
 restore_video; rc=$?
-check "restore proceeds (HPD high)"        '[ "$(cat "$HPD_NODE")" = "1" ]'
-check "marker cleared"                     '[ ! -f "$MARKER" ]'
+check "rc=0"                                '[ "$rc" -eq 0 ]'
+check "replug wrote sink then dual"         '[ "$(writes)" = "sink dual " ]'
+check "marker cleared"                      '[ ! -f "$MARKER" ]'
+check "state=on"                            '[ "$(cat "$STATE_FILE")" = "on" ]'
 echo
 
-# ---- T4: escape hatch VBUS_GUARD=0 ---------------------------------------
-echo "T4  VBUS_GUARD=0 with usb/online=0 -> guard disabled (documented risk)"
-setup 0 0
+# ---- B4. replug ineffective -> hpd=1 second, screen bounce third --------
+echo "B4 replug ineffective -> hpd=1, then screen bounce (both gated)"
+setup 1 1 0
 restore_video; rc=$?
-check "guard disabled: HPD forced high"    '[ "$(cat "$HPD_NODE")" = "1" ]'
-check "marker cleared"                     '[ ! -f "$MARKER" ]'
+check "replug attempted first"              '[ "$(writes | cut -d" " -f1-2 | sed "s/ *$//")" = "sink dual" ]'
+check "hpd=1 only after replug"             'grep -qx "1" "$ECHOLOG"'
+check "screen bounce as last resort"        'grep -q "keyevent 26" "$INPUTLOG"'
+check "rc=1 (reported as failure, will retry)" '[ "$rc" -eq 1 ]'
 echo
 
-# ---- T5: no partner -> skip before the guard even runs --------------------
-echo "T5  no partner/cable attached -> skip (rc=2), guard untouched"
-setup 0
+# ---- B5. escape hatch ---------------------------------------------------
+echo "B5 VBUS_GUARD=0 -> guard disabled even with usb/online=0"
+setup 0 0 0
+restore_video
+check "proceeds to the ladder"              'grep -q "sink" "$ECHOLOG"'
+echo
+
+# ---- B6. nothing attached ----------------------------------------------
+echo "B6 no partner -> skip with rc=2, zero writes"
+setup 0 1 0
 STUB_LINK=0
 restore_video; rc=$?
-check "returns 2 (skipped)"                '[ "$rc" -eq 2 ]'
-check "HPD untouched"                      '[ "$(cat "$HPD_NODE")" != "1" ]'
+check "rc=2"                                '[ "$rc" -eq 2 ]'
+check "nothing written to hpd/port_type"    '[ -z "$(writes)" ]'
 echo
 
-# ---- T6: screenvid.sh and service.sh must keep identical guard logic ------
-echo "T6  guard logic identical in screenvid.sh and service.sh (drift check)"
-SV="$HERE/../tab-dp-watchdog/screenvid.sh"
-SE="$HERE/../tab-dp-watchdog/service.sh"
-body_of() {  # body_of <file> <fn> -> code lines only
+# ---- C. static invariants (the regression class) ------------------------
+echo "C  static invariants"
+n_hpd=$(grep -c '> *"\$HPD_NODE"' "$SV")
+check "screenvid.sh has exactly 1 hpd write (restore rung 2)" '[ "$n_hpd" = "1" ]'
+guard_block=$(awk '/external VBUS observation/,/^$/' "$SV")
+check "VBUS observation block writes nothing to hpd" \
+    '! printf "%s" "$guard_block" | grep -q "HPD_NODE *2"'
+check "VBUS observation block writes nothing to port_type" \
+    '! printf "%s" "$guard_block" | grep -qF "> \"\$TYPEC_PORT/port_type\""'
+check "no eager restore on the VBUS edge (v1.6.0 bug)" \
+    '! printf "%s" "$guard_block" | grep -q "restore_video"'
+check "service.sh holds recovery for PD_SETTLE after VBUS returns" \
+    'grep -q "vbus_ready" "$SE" && grep -q "^PD_SETTLE=" "$SE"'
+check "service.sh stale-marker path no longer pokes hpd" \
+    '! sed -n "/marker cleared; screenvid owns/,+2p" "$SE" | grep -q "HPD_NODE"'
+echo
+
+# ---- D. drift between the two daemons -----------------------------------
+echo "D  guard logic identical in screenvid.sh and service.sh"
+body_of() {
     awk -v fn="$2" '
         $0 ~ ("^" fn "\\(\\) \\{") { inside = 1; next }
         inside && /^}$/ { exit }
-        inside { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]*#.*$/, "", line); if (line != "") print line }
+        inside { l = $0; sub(/^[ \t]+/, "", l); sub(/[ \t]*#.*$/, "", l); if (l != "") print l }
     ' "$1"
 }
-a=$(body_of "$SV" ext_vbus_ok)
-b=$(body_of "$SE" ext_vbus_ok)
-if [ -n "$a" ] && [ "$a" = "$b" ]; then
-    ok "ext_vbus_ok implementations match"
-else
-    bad "ext_vbus_ok drifted between screenvid.sh and service.sh"
-    echo "--- screenvid ---"; echo "$a"; echo "--- service ---"; echo "$b"
-fi
-a=$(body_of "$SV" vbus_evidence)
-b=$(body_of "$SE" vbus_evidence)
-if [ -n "$a" ] && [ "$a" = "$b" ]; then
-    ok "vbus_evidence implementations match"
-else
-    bad "vbus_evidence drifted between screenvid.sh and service.sh"
-fi
+a=$(body_of "$SV" ext_vbus_ok); b=$(body_of "$SE" ext_vbus_ok)
+check "ext_vbus_ok match"  '[ -n "$a" ] && [ "$a" = "$b" ]'
+a=$(body_of "$SV" vbus_evidence); b=$(body_of "$SE" vbus_evidence)
+check "vbus_evidence match" '[ -n "$a" ] && [ "$a" = "$b" ]'
 echo
 
 echo "=== result: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1
-

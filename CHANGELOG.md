@@ -3,6 +3,93 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.8.0
+
+### 修复（v1.7.0 的遗漏：屏幕不断电）
+
+**现象**：拔掉外屏 PD 供电后，外接触摸屏**仍然有电**（不算黑屏待机，是被平板反过来供电）。
+在并入模块之前的手工补丁版本上，同样的操作会让屏幕彻底断电。
+
+**原因**（在 SM-T970 上实测得到）：
+
+| 事实 | 证据 |
+|---|---|
+| 拔掉 PD 后 DRP 翻到 Attached.SRC，平板用电池给屏供电 | `vbus gone` 边沿日志：`otg=1 role=[source] ma=-1625` |
+| `hpd` 两个方向都是空操作 | 写入 `rc=0`，`status/enabled/pclk` 与内核日志零变化 |
+| `otg/online=0` 被内核自己重新打开 | 写入后 1s 内回到 1 |
+| **`port_type` 是唯一真能掐断 5V 的杠杆** | `echo sink > port_type` → `usb/online 1→0`、`dp=disconnected`、`pclk=0`；`echo dual` → 全部恢复 |
+
+v1.7.0 沿用了 v1.5.1 的结论「`port_type` 写不进去（`invalid typec_role`）」，
+所以只剩「不碰链路」这一半修复，**没有切断平板自己的 5V 输出**——
+屏幕继续靠平板电池活着，自然不会断电。而当年的 v1.5.1 `powergate.sh`
+用 `port_type=sink` 做的正是这件事，去掉它之后这个效果就消失了。
+
+### 新增：sink 闸门（SINK_GATE，默认开启）
+
+外接 VBUS 连续 2 次采样缺失后，把 `port_type` 钉为 `sink`（移除端口的
+Source 能力 → 不可能输出 5V）→ 屏幕失去供电自然断电、DP 随之断开。
+每 6 秒复核一次（内核会自己把 Source 能力装回去），外接供电回来立即释放。
+
+| 文件 | 改动 |
+|---|---|
+| `screenvid.sh` | 新增 `pin_sink/gate_engage/gate_release/gate_in_grace`；主循环 VBUS 缺失时engage + 定期复核，返回时释放；启动时清除上一次运行残留的闸门 |
+| `service.sh` | `virtual_replug()` 在闸门期间拒绝执行（它会写 `dual`，把 Source 能力还回去）；主循环加了「VBUS 已恢复但闸门还在」的安全网（连 2 次即释放，sink-only 端口无法充电） |
+| `action.sh` / `web/cgi-bin/recover` | 手动恢复前先释放闸门 |
+| `uninstall.sh` | **无条件**写 `port_type=dual`。原先是「回读到 `[sink]` 才还原」，但闸门生效时回读仍显示 `[dual] source sink`，条件永远不成立 → 卸载后会留下无法充电的端口 |
+| `tests/sink_gate_test.sh` | 23 条断言：engage 幂等、release 写 dual、10s 宽限期、`SINK_GATE=0` 关闭、以及 8 条与出货脚本的漂移检查 |
+
+安全网：闸门标记 `/data/adb/tpdp/sink_gate` 绝不跨重启继承；`service.sh`
+与 `screenvid.sh` 任一方发现「供电已回来但闸门还在」都会立刻释放；
+`SINK_GATE=0` 可完全关闭。
+
+## v1.7.0
+
+### 修复（回归，v1.6.0 引入）
+
+- **装成模块后拔插 PD：画面不恢复；且拔掉 PD 后屏幕不再断电。**
+
+  v1.6.0 的守卫做了两件多余的事，把内核自己的断链/重连流程打坏了：
+
+  1. **PD 一回来就立刻调 `restore_video()`**，而该函数第一件事就是
+     `echo 1 > /sys/kernel/debug/drm_dp/hpd`。这一写正好落在 USB PD
+     VDM 重新协商的窗口里（实测 19:18:15 供电回来，19:18:17 就写了），
+     把 sink 的链路状态打成半协商态：
+     `status=connected enabled=enabled` 但 `dp_debug pclock=0`
+     ——软件看"正常"，屏幕是黑的。
+  2. **守卫每 3 秒 `echo 0 > hpd`**。实测该节点在本内核是**空操作**：
+     写入 `rc=0`、状态零变化、内核零日志（`hpd=1` 才会触发
+     `dp_usbpd_simulate_connect`，且只重配已连接的链路，不 enable 编码器）。
+     纯属多余，却持续扰动驱动的模拟 HPD 状态。
+
+  而当初在设备上验证通过 4 连拔插的那份补丁（tabpdmon 18:10）**只做了一件事**：
+  在 `restore_video()` 开头加一道 `usb/online != 1` 的抑制闸门，**一个 hpd 都不写**。
+  断链、重连、恢复全部交给内核，所以断电时屏幕会真的掉电、插回后画面自动回来。
+
+  v1.7.0 回到那条路线上，并把"恢复成功"的判据换成真相：
+
+  | 判据 | v1.6.0 | v1.7.0 |
+  |---|---|---|
+  | 画面是否真的在输出 | `status=connected && enabled`（会骗人） | `dp_debug pclock > 0` |
+  | PD 缺失时对链路 | 每 3 秒写 `hpd=0` | 什么都不写 |
+  | PD 回来时 | 立刻 `restore_video()`（→ `hpd=1`） | 先等 `PD_SETTLE=4s` 让 PD 合约落地，再判定；只在真的没画面时才修 |
+
+### 恢复阶梯（仅在确认没画面时使用）
+
+1. `port_type` 虚拟拔插 `sink -> dual` —— 本内核唯一能强制重新枚举的杠杆
+2. `hpd=1`（simulate connect，只重配已连接链路）
+3. 熄屏→亮屏一次 —— 走显示栈的完整 disable/enable，实测把
+   `state 0x0 pclock 0` 干净地拉回 `state 0xa5 pclock 268500`
+
+### 配套
+
+- `service.sh`：恢复引擎在 PD 回来后同样等待 `PD_SETTLE` 再计数打击，
+  不再把虚拟拔插打进 PD 协商窗口；陈旧 `video_off` 清理不再 pokes hpd。
+- `screenvid.sh`：`cut_video()` 不再写 `hpd=0`（空操作），改为确认显示栈
+  已经切断（实测熄屏即 `disconnected/disabled/state 0x0`），不再空转计失败。
+- 测试：`tests/vbus_guard_test.sh` 重写为 35 条断言（含"已在上流时**零写入**"
+  "PD 缺失时**零写入**""恢复阶梯顺序"以及源码静态不变量），
+  与 `tests/uninstall_test.sh` 合计 50 条全过。
+
 ## v1.6.0
 
 ### 修复（重要）
