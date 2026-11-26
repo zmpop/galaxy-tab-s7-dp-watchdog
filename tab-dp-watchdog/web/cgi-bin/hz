@@ -82,8 +82,17 @@ sed -i '/^HZ_MODE=/d;/^LOCK60=/d' "$CFG" 2>/dev/null
 printf 'HZ_MODE=%s\n' "$mode" >> "$CFG"
 
 # 3) re-enumerate so the framework re-picks a mode within the new limit
+# v1.5.0: skipped when external VBUS is missing - "echo 1 > hpd" would re-stream
+# DP over the tablet's own battery (the 17:36 NoC panic path). The cap itself is
+# already written, so the mode takes effect on the next healthy enumeration.
 note=""
-if [ "$dp_up" = "1" ]; then
+usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)
+vbus_ok=1
+if [ "${VBUS_GUARD:-1}" = "1" ] && [ -n "$usb_online" ] && [ "$usb_online" != "1" ]; then
+    vbus_ok=0
+    note="（未检测到外接屏 PD 供电，已跳过链路重枚举以免内核 panic；供电恢复后自动生效）"
+fi
+if [ "$dp_up" = "1" ] && [ "$vbus_ok" = "1" ]; then
     echo 0 > "$HPD_NODE" 2>/dev/null
     sleep 2
     echo 1 > "$HPD_NODE" 2>/dev/null
@@ -93,7 +102,7 @@ if [ "$dp_up" = "1" ]; then
         sleep 1
         i=$((i + 1))
     done
-else
+elif [ "$dp_up" != "1" ]; then
     note="（DP 链路当前未连接，将在下次连接时生效）"
 fi
 

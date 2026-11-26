@@ -3,6 +3,55 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.5.0
+
+### 修复（重要）
+
+- **拔掉外接屏 PD 供电导致平板异常重启（内核 panic）**。
+  现象：一线通接外接触摸屏工作正常，一旦拔掉屏幕端的 PD 供电，平板在数秒到
+  十几秒内直接 panic 重启（三星安全看门狗复位，`ro.boot.bootreason=kernel_panic`）。
+  本次定案证据：RAMDUMP `eRR.p` 中同一签名的 `RWC 80/83/86/89` 4 次；崩溃前
+  kmsg 完整链条为
+
+  ```
+  MUIC 判 OTG -> port0 power_role=source, otg/online=1, 放电 ~1.9A, Vbat 3.90->3.73V
+  [sh: 1837] dp_display_usbpd_configure_cb: +++        <- 模块的 echo 1 > drm_dp/hpd
+  dp_display_enable: add DP_STATE_ENABLED  2560x1600@60 (pclk 268.5/300MHz)
+  dp_display_disconnect_sync: DP_STATE_ABORTED state(0x15f)
+  sde_kms_wait_for_commit_done -110  x2
+  TZBSP_ERR_FATAL_NOC_ERROR / asynchroomus_serror_ilterrupt -> panic
+  ```
+
+  根因：屏幕 PD 供电消失后平板翻成 Source，用自身电池给屏供电；此时模块任一
+  "`echo 1 > hpd`" 路径（息屏亮屏恢复 / 开机补救 / 刷新率重枚举 / 虚拟拔插 /
+  手动恢复）都会让 DP 在**没有外部供电的端口上重新上流**。随后 PD 插回触发 VDM
+  重协商，而 HPD 拉低时视频流仍为 ENABLED，commit 路径死锁，NoC/TrustZone 致命。
+  4 次复测证明：断电把链路拆干净不会出问题，致死的是"拆完又被软件拉活 -> 二次拆链"。
+
+- 新增**外部供电守卫**（`VBUS_GUARD`，默认 `1` 开启），覆盖全部会把 HPD 拉高的路径：
+  - `screenvid.sh`
+    - 主动侧：`usb/online != 1` 的边沿立刻 `echo 0 > hpd` + 置 `video_off` 标记，
+      并在无供电期间每 3 秒复核一次链路，一旦被内核/框架重新拉活立即再次按下去；
+    - 被动侧：`restore_video()` 在拉高 HPD 前校验外部供电，缺失则整段跳过并保持
+      标记（同时抑制 `service.sh` 的虚拟拔插恢复引擎），PD 接回后 3 秒内自动恢复画面；
+  - `service.sh`：开机补救（`boot_video_failsafe`）、刷新率重枚举（`hz_reevaluate`）、
+    陈旧标记清理、故障恢复引擎（`virtual_replug`）四处全部加守卫，无外部供电时
+    恢复引擎"解除武装"并每分钟只记一条日志，不再空转 100 秒重试阶梯；
+  - `action.sh`（Magisk「执行」按钮）：无供电时拒绝强制恢复并说明原因；
+  - `web/cgi-bin/hz`：无供电时只写像素时钟上限，跳过链路重枚举；
+  - `web/cgi-bin/recover`：无供电时拒绝虚拟拔插。
+
+- 判定依据（实测取值，见 `docs/`）：外部供电在位 `usb/online=1`、`power_role=sink`、
+  `otg/online=0`、电池充电；拔掉屏 PD 后 `usb/online=0`、`power_role=source`、
+  `otg/online=1`、放电约 1.9A。`usb/online` 节点不存在（安装/卸载环境）时不拦截。
+
+### 已知取舍
+
+- 屏幕 PD 断电期间外接屏不显示（这是预期行为：宁可黑屏，不要重启）。接回 PD 后
+  画面自动恢复，无需重新插拔一线通。
+- 若确实需要"平板给屏供电"（不接屏侧 PD），必须显式设置 `VBUS_GUARD=0`，
+  此时 v1.5.0 的保护失效，崩溃风险自负。
+
 ## v1.4.0
 
 ### 新增功能

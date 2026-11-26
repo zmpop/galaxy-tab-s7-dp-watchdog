@@ -24,6 +24,21 @@
 #                                     this boot (video is left ON = safe)
 #   hb.video         heartbeat      - mtime touched every ~10s
 #   screen.ev        screen_toggled event feed (one line per toggle)
+#
+# v1.5.0 - EXTERNAL VBUS GUARD (kernel panic fix)
+#   Pulling the external screen's PD supply makes the tablet flip to Source and
+#   feed the screen from its own battery (power_role=source, otg/online=1,
+#   ~1.9A draw, Vbat 3.90 -> 3.73V). If HPD is forced high in that state the DP
+#   link re-streams 2560x1600@60 on a port with no external supply; when the PD
+#   is plugged back in, VDM re-negotiation aborts a still-ENABLED stream:
+#     DP_STATE_ABORTED state(0x15f) -> sde_kms_wait_for_commit_done -110 x2
+#     -> MM NoC fatal -> TZBSP_ERR_FATAL_NOC_ERROR -> SError(NMI) -> panic
+#   (observed 2026-11-26 17:36, repeated 4x in the RAMDUMP eRR.p signature).
+#   This daemon therefore (a) actively holds HPD low the moment external VBUS
+#   disappears, and (b) refuses every restore while it is absent. The link
+#   comes back by itself once the PD supply is reconnected (<=3s).
+#   Set VBUS_GUARD=0 in $LOGDIR/config to disable (NOT recommended: the tablet
+#   may then power the screen itself and hit the panic path again).
 
 MODDIR=${0%/*}
 LOGDIR=/data/adb/tpdp
@@ -48,6 +63,12 @@ MARKER=$LOGDIR/video_off
 DISABLED=$LOGDIR/video.disabled
 HB=$LOGDIR/hb.video
 EVFILE=$LOGDIR/screen.ev
+# ---- v1.5.0 external VBUS guard ----
+VBUS_GUARD=1            # 1 = never force HPD high while external VBUS is absent
+EXT_VBUS=/sys/class/power_supply/usb/online
+OTG_ONLINE=/sys/class/power_supply/otg/online
+POWER_ROLE=$TYPEC_PORT/power_role
+BAT_CUR=/sys/class/power_supply/battery/current_now
 # ------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
@@ -83,6 +104,26 @@ link_present() {
 }
 
 partner_present() { [ -d "$PARTNER_DIR" ]; }
+
+# ---- v1.5.0: external VBUS guard ---------------------------------------
+# usb/online = 1  -> real external power is on the port (charger / screen PD)
+# usb/online = 0  -> nothing feeds VBUS; the tablet is Source and powers the
+#                    screen from its own battery -> re-streaming DP is fatal
+# node missing    -> cannot judge (installer/uninstaller context): never block
+ext_vbus_ok() {
+    [ "$VBUS_GUARD" = "1" ] || return 0
+    local u
+    u=$(cat "$EXT_VBUS" 2>/dev/null)
+    [ -z "$u" ] && return 0
+    [ "$u" = "1" ] && return 0
+    return 1
+}
+
+# one-line evidence for the log / reports
+vbus_evidence() {
+    echo "usb/online=$(cat "$EXT_VBUS" 2>/dev/null) otg=$(cat "$OTG_ONLINE" 2>/dev/null) role=$(cat "$POWER_ROLE" 2>/dev/null) port=$(cat "$TYPEC_PORT/port_type" 2>/dev/null) ma=$(cat "$BAT_CUR" 2>/dev/null)"
+}
+
 
 refresh_actual() {
     ACT_ST=$(cat "$DP_CONN" 2>/dev/null)
@@ -135,6 +176,27 @@ restore_video() {
         log "restore skipped: no partner/cable attached"
         return 2
     fi
+
+    # ---- v1.5.0: never force HPD high without external VBUS --------------
+    # THIS is the exact line that produced the 17:36 NoC panic: the screen's PD
+    # supply was gone, the tablet was Source, and this function still ran
+    # "echo 1 > hpd" -> dp_display_usbpd_configure_cb: +++ -> DP re-streamed on
+    # a port with no supply. Keep the link down and the marker in place (the
+    # marker also keeps service.sh's replug engine from trying), and let the
+    # main loop retry every 3s so the picture returns the moment PD is back.
+    if ! ext_vbus_ok; then
+        echo off > "$STATE_FILE"
+        touch "$MARKER"
+        if [ "$vbus_notice" != "1" ]; then
+            log "restore SUPPRESSED: no external VBUS ($(vbus_evidence)) - forcing HPD here re-streams DP on the tablet's own 5V and ends in the 17:36 NoC panic; waiting for PD"
+            vbus_notice=1
+        fi
+        vbus_wait=1
+        return 0
+    fi
+    vbus_notice=0
+    vbus_wait=0
+
     local i=0 ok=0
     if ensure_hpd; then
         while [ $i -lt 3 ]; do
@@ -243,8 +305,51 @@ tick=0
 hb_tick=0
 feed_fail=0
 feed_retry=0
+vbus_notice=0
+vbus_wait=0
+vbus_cut=0
 
 while true; do
+    # ---- v1.5.0: external VBUS guard, active side ------------------------
+    # While VBUS is absent, hold the link DOWN ourselves instead of waiting for
+    # a restore to be refused: the kernel may re-train on its own, and any
+    # stream that exists when the PD comes back aborts the commit path.
+    # Written on edge only (debugfs write is cheap but not free).
+    vbus_ok_now=0
+    ext_vbus_ok && vbus_ok_now=1
+    if [ "$vbus_ok_now" = "0" ]; then
+        if [ "$vbus_cut" != "1" ]; then
+            vbus_cut=1
+            ensure_hpd && echo 0 > "$HPD_NODE" 2>/dev/null
+            touch "$MARKER"
+            echo off > "$STATE_FILE"
+            log "vbus guard: external VBUS gone ($(vbus_evidence)) - DP held DOWN, restore blocked until power returns"
+        else
+            # The kernel or the framework may re-enable the link on its own
+            # (that is the "died and came back" half of the panic sequence).
+            # Re-assert HPD low every 3 ticks while VBUS is missing.
+            vbus_recheck=$(( ${vbus_recheck:-0} + 1 ))
+            if [ "$vbus_recheck" -ge 3 ]; then
+                vbus_recheck=0
+                refresh_actual
+                if [ "$ACT_ST" != "disconnected" ]; then
+                    ensure_hpd && echo 0 > "$HPD_NODE" 2>/dev/null
+                    log "vbus guard: link was re-enabled without external power (status=$ACT_ST enabled=$ACT_EN) - HPD forced down again"
+                fi
+            fi
+        fi
+    elif [ "$vbus_cut" = "1" ]; then
+        vbus_cut=0
+        vbus_wait=0
+        log "vbus guard: external VBUS back ($(vbus_evidence)) - restoring"
+        # Reconcile immediately instead of waiting for the next 15s poll: the
+        # screen was black for as long as the PD was out, so restore it now.
+        if [ "$(screen_want)" != "off" ]; then
+            restore_video >/dev/null 2>&1
+        fi
+    fi
+
+
     # ---- supervise the main daemon (mutual watchdog) ----
     hb_tick=$((hb_tick + 1))
     if [ "$hb_tick" -ge "$HB_TICKS" ]; then
@@ -300,6 +405,9 @@ while true; do
     tick=$((tick + 1))
     limit=$POLL_TICKS_ON
     [ "$last_want" = "off" ] && limit=$POLL_TICKS_OFF
+    # v1.5.0: while a restore is blocked on missing VBUS, poll the power state
+    # every 3s so the picture comes back right after the PD is reconnected.
+    [ "$vbus_wait" = "1" ] && limit=$POLL_TICKS_OFF
     if [ -z "$want" ] || [ "$tick" -ge "$limit" ]; then
         tick=0
         p=$(screen_want)
@@ -316,7 +424,15 @@ while true; do
     fi
 
     # ---- act on transition, or periodically reconcile drift ----
-    if [ -n "$want" ] && { [ "$want" != "$last_want" ] || [ "$src" = "poll" ] || [ "$src" = "poll-fix" ]; }; then
+    # v1.5.0: with no external VBUS the guard above owns the link state. Running
+    # the normal "screen on but video down -> restore" path here would just log
+    # the same failure every 3s, so it is skipped entirely; the marker stays in
+    # place and the restore happens on the first tick after power returns.
+    if [ "$vbus_ok_now" = "0" ] && [ "$want" = "on" ]; then
+        # guard holds the link down; last_want is left alone on purpose so the
+        # restore fires the moment external power returns
+        :
+    elif [ -n "$want" ] && { [ "$want" != "$last_want" ] || [ "$src" = "poll" ] || [ "$src" = "poll-fix" ]; }; then
         refresh_actual
         if [ "$want" = "off" ]; then
             if video_actual_off; then

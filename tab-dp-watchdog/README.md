@@ -124,6 +124,57 @@ Magisk app → 模块 → 从本地安装 → 选择 tab-dp-watchdog-v1.4.0.zip 
 开启"强制息屏超时"时,若检测到前台应用持有 `SCREEN_BRIGHT_WAKE_LOCK`
 (如全屏播放视频)则**不**强制休眠。
 
+## 外部供电守卫:拔掉屏幕 PD 电源不再重启(v1.5.0)
+
+**现象**:一线通正常工作,拔掉**屏幕端 PD 供电线**后,平板在数秒~十几秒内直接 panic
+重启(三星安全看门狗复位)。多次复现,`ro.boot.bootreason=kernel_panic,asynchroomus_serror_ilterrupt`,
+RAMDUMP `eRR.p` 中同一签名 4 次(`RWC 80/83/86/89`)。
+
+**根因链**(kmsg 与 `power_supply` 逐帧对齐):
+
+```
+1. 拔掉屏幕 PD  -> MUIC 判为 OTG -> port0 翻 Source
+                 power_role=source, otg/online=1, 放电 ~1.9A, Vbat 3.90 -> 3.73V
+2. 链路掉一次  -> 模块按"亮屏但视频没了"去恢复 -> echo 1 > drm_dp/hpd
+                 [sh: 1837] dp_display_usbpd_configure_cb: +++
+3. DP 在无外部供电的端口上重新上流 2560x1600@60 (pclk 268.5/300MHz)
+4. PD 插回 -> VDM 重协商 -> HPD 拉低时流仍 ENABLED
+5. dp_display_disconnect_sync: DP_STATE_ABORTED state(0x15f)
+   sde_kms_wait_for_commit_done -110  x2
+6. TZBSP_ERR_FATAL_NOC_ERROR -> SError(NMI) -> panic
+```
+
+关键反证:同一次开机里 `0x15f` 出现 2 次都**没有**崩;拔掉 PD 后把链路彻底拆干净也不崩。
+致死的不是"断电",而是**断电后又被软件把视频流拉活,然后二次拆链**。
+
+**修复**:所有会写 `echo 1 > drm_dp/hpd`(或等效重新上流)的路径全部校验外部供电。
+
+| 触发点 | v1.5.0 行为(无外部供电时) |
+|---|---|
+| `screenvid.sh` 亮屏恢复 | 整段跳过,保持 `video_off` 标记(同时抑制主守护的虚拟拔插);只记一条日志 |
+| `screenvid.sh` 主动守卫 | `usb/online` 边沿立刻 `hpd=0`;无供电期间每 3 秒复核,被重新拉活就再按下去 |
+| `service.sh` 开机补救 | 不清标记、不拉高 HPD |
+| `service.sh` 刷新率重枚举 | 跳过,只保留像素时钟上限 |
+| `service.sh` 恢复引擎 | 解除武装(不再空转 100 秒重试阶梯),供电回来自动重新武装 |
+| `action.sh`(「执行」按钮) | 拒绝强制恢复并提示先接 PD |
+| `web/cgi-bin/hz` | 只写上限,跳过重枚举 |
+| `web/cgi-bin/recover` | 拒绝虚拟拔插 |
+
+**供电判定依据**(本机实测):
+
+| 状态 | usb/online | power_role | otg/online | 电池电流 |
+|---|---|---|---|---|
+| 屏 PD 在位 | 1 | sink | 0 | 充电(正) |
+| 屏 PD 拔掉 | 0 | source | 1 | 放电 ~1.9A |
+
+节点不存在(安装/卸载脚本环境)时判定为"无法判断",**不**拦截,避免安装后黑屏。
+
+**行为取舍**:屏幕 PD 断电期间外接屏不显示(宁可黑屏,不要重启)。**PD 接回后约 3 秒
+画面自动恢复**,无需重新插拔一线通。息屏/亮屏切换在供电正常时行为完全不变。
+
+**关闭方式**(不推荐):`/data/adb/tpdp/config` 写 `VBUS_GUARD=0`。
+此时模块恢复 v1.4.0 行为,允许平板用自身电池给屏供电——崩溃风险自负。
+
 ## 配置(可选)
 
 复制并编辑 `/data/adb/tpdp/config`:
@@ -143,6 +194,7 @@ VIDEO_MAX_FAIL=5       # 切断连续失败多少次后自动停用该功能(保
 WAKE_GATE=1            # 1=仅触摸/电源键可亮屏, 0=不限制亮屏来源
 WAKE_GATE_TOUCH=1      # 1=允许触摸点击唤醒(仅 WAKE_GATE=1 时生效)
 TIMEOUT_ENFORCE=1      # 1=系统自动息屏被唤醒锁屏蔽时强制休眠
+VBUS_GUARD=1           # 1=无外部供电时禁止任何"重新上流"动作(v1.5.0, 建议保持 1)
 ```
 
 配置文件被修改(含从 Web 界面保存)后,守护进程会在一个轮询周期内自动重新加载。

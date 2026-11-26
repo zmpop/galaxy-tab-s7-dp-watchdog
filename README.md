@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.3.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.5.0-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
@@ -20,8 +20,25 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 | 2 | 先插一线通、后给屏幕供电，黑屏 | 同上（触摸屏上电枚举后接管） | v1.0.0 |
 | 3 | 运行中 DP 链路偶发掉线 | 同上 | v1.0.0 |
 | 4 | 从屏幕端拔插 PD 供电线后端口卡死 | 本次开机 DP 曾=1 && 现=0 && partner 在线/震荡 | v1.1.0 |
+| 5 | 拔掉屏幕 PD 供电后平板**异常重启**（内核 panic） | `usb/online=0` 且 `power_role=source`（平板在给屏供电） | v1.5.0 |
 
 平板单独使用（本次开机从未连接过屏幕）永不误触发；连接普通 PD 充电器、U 盘等 USB 配件不误触发。
+
+## 拔屏幕 PD 电源不再异常重启（v1.5.0）
+
+拔掉屏幕端的 PD 供电线会让平板翻成 Source、用自身电池给屏供电（实测放电约 1.9A）。
+此时若模块仍按"亮屏但视频没了"去 `echo 1 > drm_dp/hpd`，DP 会在**没有外部供电的端口上
+重新上流**；PD 插回触发 VDM 重协商时，HPD 拉低而流仍 ENABLED，commit 路径死锁：
+
+```
+DP_STATE_ABORTED state(0x15f) -> sde_kms_wait_for_commit_done -110 x2
+-> TZBSP_ERR_FATAL_NOC_ERROR -> SError(NMI) -> panic (安全看门狗复位)
+```
+
+v1.5.0 在所有"HPD 拉高 / 重新上流"路径前校验 `usb/online=1`（真实外部供电）：
+无供电时主动把链路按下去并保持关闭，**PD 接回后约 3 秒画面自动恢复**，不再重启。
+断电期间外接屏不显示是预期行为（宁可黑屏，不要重启）。详见
+[tab-dp-watchdog/README.md](tab-dp-watchdog/README.md#外部供电守卫拔掉屏幕-pd-电源不再重启v150)。
 
 ## 息屏自动切断视频输出（v1.3.0）
 

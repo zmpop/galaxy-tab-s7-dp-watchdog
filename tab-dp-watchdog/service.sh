@@ -1,7 +1,18 @@
 #!/system/bin/sh
-# Tab S7 DP Link Watchdog v1.4.0 - service entry
+# Tab S7 DP Link Watchdog v1.5.0 - service entry
 # Runs as root (u:r:magisk:s0) at late_start service mode.
 #
+# v1.5.0: external VBUS guard (kernel panic fix).
+#   Root cause of the 2026-11-26 17:36 panic: the screen's PD supply was pulled,
+#   the tablet flipped to Source and powered the screen from its own battery
+#   (~1.9A), and one of this module's "echo 1 > hpd" paths re-streamed DP on
+#   that unsupplied port. Plugging the PD back in then aborted a still-ENABLED
+#   stream (DP_STATE_ABORTED 0x15f) -> sde_kms_wait_for_commit_done -110 ->
+#   MM NoC fatal -> TZBSP_ERR_FATAL_NOC_ERROR -> SError(NMI) -> kernel panic.
+#   Fix: every HPD-high path (boot failsafe, hz re-enumerate, stale-marker
+#   restore, virtual replug) is gated on usb/online=1, i.e. real external
+#   power. With no VBUS the link is deliberately left DOWN and recovers by
+#   itself once the PD supply is reconnected. Config: VBUS_GUARD=0 disables.
 # v1.4.0: screen wake gate + screen-off timeout enforcer (wakegate.sh).
 #   Keeps the tablet from lighting up on non user events and from staying lit
 #   when the framework timeout is blocked by Samsung's HDMI wake lock.
@@ -55,6 +66,7 @@ PCLK_120_KHZ=560000    # 120Hz-class pixel clock cap; 120Hz mode needs 537MHz
 WAKE_GATE=1            # 1 = only touchscreen tap / power key may light the screen
 WAKE_GATE_TOUCH=1      # 1 = touchscreen tap is allowed to wake (needs WAKE_GATE=1)
 TIMEOUT_ENFORCE=1      # 1 = force the system screen-off timeout to take effect
+VBUS_GUARD=1           # v1.5.0: 1 = never force HPD high without external VBUS
 # --------------------------------------------------------------------
 
 [ -f "$LOGDIR/config" ] && . "$LOGDIR/config"
@@ -78,6 +90,31 @@ log() {
 
 # ---------- screen gated video output (v1.3.0) ----------
 HPD_NODE=/sys/kernel/debug/drm_dp/hpd
+
+# ---------- v1.5.0: external VBUS guard ----------
+# Every place that can force HPD high must be gated on real external power:
+# usb/online=1 means a charger / the screen's PD supply feeds VBUS. When it is
+# 0 the tablet is Source and powers the screen from its own battery; re-streaming
+# DP in that state is what produced the 2026-11-26 17:36 NoC panic (DP_STATE_
+# ABORTED 0x15f -> sde_kms_wait_for_commit_done -110 -> SError -> panic).
+# Keep in sync with screenvid.sh.
+EXT_VBUS=/sys/class/power_supply/usb/online
+OTG_ONLINE=/sys/class/power_supply/otg/online
+POWER_ROLE=$TYPEC_PORT/power_role
+BAT_CUR=/sys/class/power_supply/battery/current_now
+
+ext_vbus_ok() {
+    [ "$VBUS_GUARD" = "1" ] || return 0
+    local u
+    u=$(cat "$EXT_VBUS" 2>/dev/null)
+    [ -z "$u" ] && return 0          # node absent -> cannot judge, never block
+    [ "$u" = "1" ] && return 0
+    return 1
+}
+
+vbus_evidence() {
+    echo "usb/online=$(cat "$EXT_VBUS" 2>/dev/null) otg=$(cat "$OTG_ONLINE" 2>/dev/null) role=$(cat "$POWER_ROLE" 2>/dev/null) port=$(cat "$TYPEC_PORT/port_type" 2>/dev/null) ma=$(cat "$BAT_CUR" 2>/dev/null)"
+}
 
 # ---------- refresh rate selector (v1.3.3) ----------
 PCLK_NODE=/sys/kernel/debug/drm_dp/max_pclk_khz
@@ -130,6 +167,12 @@ apply_hz_mode() {
 hz_reevaluate() {
     # Re-enumerate the DP link once so the framework re-picks a mode within
     # the current cap. Only called when the live timing exceeds the target.
+    # v1.5.0: the "echo 1" half re-streams DP; never do it without external
+    # power (booting on battery with the screen attached used to hit the panic).
+    if ! ext_vbus_ok; then
+        log "hz: re-enumeration skipped - no external VBUS ($(vbus_evidence))"
+        return 1
+    fi
     echo 0 > "$HPD_NODE" 2>/dev/null
     sleep 2
     echo 1 > "$HPD_NODE" 2>/dev/null
@@ -190,6 +233,13 @@ boot_video_failsafe() {
         grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null || return 0
     fi
     if grep -q disconnected /sys/class/drm/card0-DP-1/status 2>/dev/null; then
+        if ! ext_vbus_ok; then
+            # v1.5.0: booting while the screen has no PD supply. Forcing HPD
+            # here would stream over the tablet's own battery - leave it down
+            # and let screenvid restore once power appears.
+            log "boot: link down with a partner attached but NO external VBUS ($(vbus_evidence)) - HPD left LOW (v1.5.0 guard)"
+            return 0
+        fi
         echo 1 > "$HPD_NODE" 2>/dev/null
         log "boot: DP link was down with a partner attached -> HPD forced high"
     fi
@@ -217,6 +267,12 @@ partner_present() {
 }
 
 virtual_replug() {
+    # v1.5.0: the replug re-negotiates CC/PD/VDM/DP, i.e. it re-streams DP.
+    # Without external VBUS that is the panic path - refuse instead of looping.
+    if ! ext_vbus_ok; then
+        log "action refused: no external VBUS ($(vbus_evidence)) - a replug would re-stream DP on the tablet's own 5V"
+        return 1
+    fi
     log "action: virtual replug (port_type sink -> dual)"
     if ! echo sink > "$TYPEC_PORT/port_type" 2>/dev/null; then
         log "error: cannot write sink to $TYPEC_PORT/port_type"
@@ -249,6 +305,7 @@ sleep "$BOOT_DELAY"
 strike=0
 episode_done=0
 ever_dp_up=0
+vbus_blocked=0
 
 while true; do
     sleep "$POLL_SEC"
@@ -308,7 +365,11 @@ while true; do
         esac
         log "video_off marker stale (${vage}s, screen ${wakefulness:-unknown}) -> clearing, restoring video"
         rm -f "$LOGDIR/video_off"
-        [ -e "$HPD_NODE" ] && echo 1 > "$HPD_NODE" 2>/dev/null
+        if ext_vbus_ok; then
+            [ -e "$HPD_NODE" ] && echo 1 > "$HPD_NODE" 2>/dev/null
+        else
+            log "  (HPD left LOW: no external VBUS - $(vbus_evidence))"
+        fi
         continue
     fi
 
@@ -340,6 +401,23 @@ while true; do
 
     if [ "$episode_done" = "1" ]; then
         continue
+    fi
+
+    # ---- v1.5.0: hold the recovery engine while external power is missing ---
+    # Fault A/B with no VBUS means the tablet is Source and feeding the screen
+    # from its battery. Retrying here would burn the 100s retry ladder on a
+    # hopeless (and dangerous) replug, so wait for the PD supply instead.
+    if ! ext_vbus_ok; then
+        if [ "$vbus_blocked" != "1" ]; then
+            vbus_blocked=1
+            log "fault $fault held: no external VBUS ($(vbus_evidence)) - recovery disarmed until the screen's PD supply is back"
+        fi
+        strike=0
+        continue
+    fi
+    if [ "$vbus_blocked" = "1" ]; then
+        vbus_blocked=0
+        log "external VBUS back - recovery re-armed"
     fi
 
     strike=$((strike + 1))

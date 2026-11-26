@@ -86,12 +86,19 @@ fi
 cfg=0
 [ -f "$CFG" ] && cfg=1
 
+# external VBUS guard (v1.5.0): 1 = external power present, 0 = absent
+# (tablet is Source, powering the screen from its own battery), -1 = unknown
+usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)
+case "$usb_online" in ''|*[!0-9]*) usb_online=-1 ;; esac
+vbg=1
+[ "${VBUS_GUARD:-1}" = "1" ] || vbg=0
+
 # screen wake control (v1.4.0)
 wg=0
 pgrep -f 'modules/tab_dp_watchdog/wakegate[.]sh' >/dev/null 2>&1 && wg=1
 touch_eff=0
 [ "$WAKE_GATE" = "1" ] && [ "$WAKE_GATE_TOUCH" = "1" ] && touch_eff=1
 
-printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s","gate":%d,"gate_touch":%d,"gate_touch_effective":%d,"gate_daemon":%d,"timeout_enforce":%d,"screen_timeout":%d}\n' \
+printf '{"vid":"%s","pid":"%s","dp":%d,"tp_online":%d,"daemon":%d,"config":%d,"remain":%d,"screen":"%s","video":"%s","video_daemon":%d,"video_switch":%d,"hz_mode":"%s","hz_applied":%d,"hz":"%s","gate":%d,"gate_touch":%d,"gate_touch_effective":%d,"gate_daemon":%d,"timeout_enforce":%d,"screen_timeout":%d,"usb_online":%d,"vbus_guard":%d}\n' \
     "$TP_VID" "$TP_PID" "$dp" "$tp" "$daemon" "$cfg" "$remain" "$scr" "$vstate" "$vid" "$vswitch" "$HZ_MODE" "$hz_applied" "$hz" \
-    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$touch_eff" "$wg" "$TIMEOUT_ENFORCE" "$to_ms"
+    "$WAKE_GATE" "$WAKE_GATE_TOUCH" "$touch_eff" "$wg" "$TIMEOUT_ENFORCE" "$to_ms" "$usb_online" "$vbg"

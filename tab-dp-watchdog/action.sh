@@ -27,14 +27,24 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOGDIR/log"; }
 # v1.3.0: manual last-resort restore. If the video output is cut while the
 # screen is on (e.g. both daemons were killed by hand), pressing the Magisk
 # action button restores the picture immediately.
+# v1.5.0: refused while external VBUS is absent - forcing HPD high there makes
+# the DP link stream over the tablet's own battery, which is the 17:36 panic.
 if [ -f "$LOGDIR/video_off" ]; then
-    log "action: cut marker present, forcing DP video output on"
-    [ -e /sys/kernel/debug/drm_dp/hpd ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
-    [ -e /sys/kernel/debug/drm_dp/hpd ] && echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
-    rm -f "$LOGDIR/video_off"
-    echo on > "$LOGDIR/video.state" 2>/dev/null
-    sleep 2
-    echo "已强制恢复视频输出（若外接屏仍无画面，请重新插拔一线通）。"
+    usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)
+    if [ "${VBUS_GUARD:-1}" = "1" ] && [ -n "$usb_online" ] && [ "$usb_online" != "1" ]; then
+        log "action: force-restore REFUSED - no external VBUS (usb/online=$usb_online)"
+        echo "已拒绝强制恢复：未检测到外接屏 PD 供电（usb/online=$usb_online）。"
+        echo "此时强拉 HPD 会让 DP 链路在平板自身电池供电下重新上流，是已知会导致内核 panic 的路径。"
+        echo "请先接上外接屏的 PD 电源，画面会自动恢复（约 3 秒），或接好后再点一次「执行」。"
+    else
+        log "action: cut marker present, forcing DP video output on"
+        [ -e /sys/kernel/debug/drm_dp/hpd ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+        [ -e /sys/kernel/debug/drm_dp/hpd ] && echo 1 > /sys/kernel/debug/drm_dp/hpd 2>/dev/null
+        rm -f "$LOGDIR/video_off"
+        echo on > "$LOGDIR/video.state" 2>/dev/null
+        sleep 2
+        echo "已强制恢复视频输出（若外接屏仍无画面，请重新插拔一线通）。"
+    fi
 fi
 
 # already running? -> just reopen the page (timer is NOT extended)

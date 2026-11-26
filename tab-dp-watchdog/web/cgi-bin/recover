@@ -17,6 +17,16 @@ if grep -q 'DP=1' "$EXTCON_STATE" 2>/dev/null; then
     exit 0
 fi
 
+# v1.5.0: a replug re-negotiates CC/PD/VDM/DP -> it re-streams DP. Without
+# external VBUS the tablet is Source and feeds the screen from its battery;
+# doing this is the confirmed kernel panic path, so refuse instead.
+usb_online=$(cat /sys/class/power_supply/usb/online 2>/dev/null)
+if [ "${VBUS_GUARD:-1}" = "1" ] && [ -n "$usb_online" ] && [ "$usb_online" != "1" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') web: recover REFUSED - no external VBUS (usb/online=$usb_online)" >> "$LOGDIR/log"
+    printf '{"ok":false,"msg":"已拒绝恢复：未检测到外接屏 PD 供电。此时虚拟拔插会让 DP 在平板自身电池供电下重新上流，可能导致内核 panic。请先接上外接屏的 PD 电源。"}'
+    exit 0
+fi
+
 echo "$(date '+%Y-%m-%d %H:%M:%S') web: manual recover requested from web UI" >> "$LOGDIR/log"
 echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
 sleep 2
