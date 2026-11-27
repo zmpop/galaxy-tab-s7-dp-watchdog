@@ -30,7 +30,7 @@ Galaxy Tab S7 + 一线通(DP Alt Mode)外接触摸屏的各类"黑屏/不断电"
 
 ## 安装
 
-Magisk app → 模块 → 从本地安装 → 选择 `tab-dp-watchdog-v1.10.0.zip` → 重启。
+Magisk app → 模块 → 从本地安装 → 选择 `tab-dp-watchdog-v1.11.0.zip` → 重启。
 （KernelSU / APatch 同样可从本地安装；TWRP 可直接刷入。）
 
 ## 本地配置界面(v1.2.0 起, v1.10.0 扩为四块)
@@ -56,6 +56,12 @@ Magisk app → 模块 → 从本地安装 → 选择 `tab-dp-watchdog-v1.10.0.zi
 - 实测时延:切断约 **1.1 秒**,恢复约 **1.1 秒**(2560x1600@120Hz 原样回来)
 - 息屏期间触摸 USB 与供电链路**不受影响**(只切视频,不切 USB/PD)
 - 开关:配置 `VIDEO_SWITCH=0` 可整体关闭;单独一次手动恢复:点 Magisk「执行」按钮
+
+> **v1.7.0–v1.10.0 这段功能实际是坏的**:v1.7.0 把 `hpd=0` 误判成「空操作」并删掉了
+> 写入,`cut_video()` 只写标记、不动链路,息屏后外接屏继续显示(真机日志每 3~5 秒刷
+> 一行 `no usable cut lever`)。原因是 `hpd` 只在边沿动作——当时是在 HPD 已经是 1 的
+> 链路上写的 1。v1.11.0 恢复真切,并补上「切断期间每 15 秒重压」(内核约 5 秒会把
+> `status` 抬回 `connected`)与 `enabled=disabled && pclk=0` 的判活标准。
 
 **原理**:`/sys/kernel/debug/drm_dp/hpd` 是高通 msm DP 的 HPD 仿真节点
 (本内核上 `/sys/class/drm/card0-DP-1/dpms` 为只读,不可用):
@@ -205,8 +211,9 @@ RAMDUMP `eRR.p` 中同一签名 4 次(`RWC 80/83/86/89`)。
 打成半协商态:内核报 `status=connected` + `enabled`、`dpms=On`,而 `dp_debug pclock=0`
 ——软件以为正常,屏幕是黑的。所以判活统一改成 **`pclock > 0`**,并且:
 
-- `hpd=0` 在本内核是**空操作**(`rc=0`、零状态变化、零内核日志),所有「拉低 HPD」的
-  路径全部删除,不再假装在做事;
+- `hpd` 只认**边沿**：1→0 拆链、0→1 重训，写同一个值是 no-op。v1.7.0 是在 HPD 已经是
+  1 时写的 1，看到「毫无变化」就判成空操作并删掉了切断动作——这是 v1.11.0 修的那个
+  回归（息屏不切视频）。现在 `cut_video()` 真切，并在切断期间每 15 秒重压一次；
 - PD 回来后先 `PD_SETTLE=4` 秒等 VDM 协商结束,再考虑恢复。
 
 **二、VBUS 会抖(v1.8.1)。** 写 `port_type` 期间 `usb/online` 会出现 1→0→1 的跳变,
@@ -225,7 +232,8 @@ v1.6.0 只保证「不崩溃」,拔掉 PD 后屏幕其实**一直有电**——�
 
 | 杠杆 | 结果 |
 |---|---|
-| `hpd=0` / `power_role=sink` | 空操作 / 被拒,回读仍 `[source]` |
+| `hpd=0` | 切 DP 有效(1 秒内 `pclk=0`),但**不切 5V**——屏仍被平板反供 |
+| `power_role=sink` | 被拒,回读仍 `[source]` |
 | `port_type=sink` | 立刻断链,但内核 ~48s 后重装 Source,期间仍供 1.3–1.5A;partner 挂着时直接 `invalid typec_role` |
 | `otg/online=0` 单次写 | 充电驱动 1 秒内重新打开 |
 | **`otg/online=0` 每 200ms 持续压制** | **有效,真正断电** |
@@ -297,6 +305,8 @@ VIDEO_SWITCH=1         # 1=息屏切断视频输出, 0=关闭该功能
 POLL_TICKS_ON=15       # 亮屏态: 每多少秒用 dumpsys 兜底校验一次
 POLL_TICKS_OFF=3       # 息屏态: 每多少秒兜底校验一次(越小唤醒恢复越快)
 VIDEO_MAX_FAIL=5       # 切断连续失败多少次后自动停用该功能(保持视频开启)
+CUT_REPIN=15           # v1.11.0: 切断期间每多少秒重压一次 hpd=0(内核约 5s 会抬回 hotplug)
+CUT_LEVER=1            # v1.11.0: 1=真切(写 hpd=0), 0=只观察不动手(现场对比用)
 
 # ---- 刷新率(v1.3.3) ----
 HZ_MODE=60             # 60 / 120 / auto(像素时钟上限分别 300000 / 560000 / 内核原值)

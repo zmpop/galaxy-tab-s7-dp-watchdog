@@ -8,13 +8,51 @@
 #   DP video signal to the external screen immediately. When the screen turns
 #   back on, restore it and re-establish the link.
 #
+# v1.11.0 - THE CUT LEVER WAS THERE ALL ALONG (regression fix 2026-11-27)
+#   Report on hardware: with the screen off the external panel kept showing the
+#   picture. Reason: v1.7.0 deleted the only working cut lever after one bad
+#   measurement ("echo 0 > hpd is a no-op"), so cut_video() has been pure
+#   bookkeeping since - it logged "no usable cut lever" and did nothing while
+#   the encoder kept streaming. Measured 2026-11-27 19:05-19:07 on the device,
+#   screen off (mWakefulness=Dozing/Asleep), no module intervention:
+#     status=connected enabled=enabled pclock=268500KHz  ...for minutes.
+#   Re-measured 19:14-19:16 on a live 2560x1600@60 stream, external VBUS on:
+#     echo 0 > drm_dp/hpd  -> within 1s status=disconnected enabled=disabled
+#                             state=0x0 pclock=0 (picture gone). ~5s later the
+#                             kernel re-asserts hotplug (status=connected) but
+#                             enabled stays disabled and pclock stays 0, so the
+#                             sink stays black. Repeatable 5/5.
+#     echo 1 > drm_dp/hpd  -> WHEN HPD IS ALREADY 1 this is a no-op, and that is
+#                             the trap v1.7.0 fell into: it poked 1 at a link
+#                             whose HPD was already high, saw nothing happen,
+#                             and concluded the node was inert. Immediately
+#                             after a 1->0 cut the very same write re-enables
+#                             the encoder in ~1s (measured 19:26: pclk 537260
+#                             -> 0 -> 268500). A lever only moves on an edge.
+#     port_type sink->dual -> within 1s status=connected enabled=enabled
+#                             state=0xa5 pclock=268500 (picture back). Dead
+#                             link only: here it is the fallback, because it
+#                             costs a USB drop.
+#   Correct division of labour:
+#     cut     = hpd 1->0 (safe: pulling HPD DOWN never re-streams, so - unlike
+#                         a raise - it needs no VBUS guard)
+#     restore = hpd 0->1 first (instant, no USB drop), then port_type replug
+#               when HPD is already high and the link is down for some other
+#               reason - a same-value write can never move anything.
+#   cut_video() now really writes the lever, re-pins hpd=0 every CUT_REPIN
+#   seconds while the cut is meant to hold (the kernel re-asserts hotplug on
+#   its own and a half-asserted link is what later confuses PD re-negotiation),
+#   and judges success by enabled+pclock rather than status.
+#
 # MECHANISM  (v1.7.0 - rewritten after measuring every lever on the device)
 #   The display stack is the ONLY thing that really cuts or re-establishes the
 #   DP stream. Measured on SM-T970 / T970ZCS7DXH1:
 #     screen off  -> status=disconnected enabled=disabled dp_debug state=0x0 pclock=0
 #     screen on   -> status=connected    enabled=enabled    state=0xa5 pclock=268500
-#   /sys/kernel/debug/drm_dp/hpd is NOT a working lever on this kernel build:
-#     echo 0 > hpd  -> rc=0, no state change, no kernel log  (no-op)
+#   /sys/kernel/debug/drm_dp/hpd - v1.7.0 measured this as a no-op and stopped
+#   writing it. THAT MEASUREMENT WAS WRONG; the line is kept only to explain
+#   the regression that v1.11.0 fixes (hpd=0 cuts a live stream in <1s):
+#     echo 0 > hpd  -> rc=0, no state change, no kernel log  (NO-OP *WRONG*)
 #     echo 1 > hpd  -> dp_usbpd_simulate_connect, but only re-configures an
 #                      already-connected link; it does not enable the encoder
 #   /sys/class/drm/card0-DP-1/dpms is read-only (open fails: Permission denied).
@@ -85,6 +123,8 @@ POLL_TICKS_ON=15        # while video is ON:  full poll every 15 ticks (s)
 POLL_TICKS_OFF=3        # while video is OFF: full poll every 3 ticks (s)
 VIDEO_MAX_FAIL=5        # consecutive cut failures -> stop cutting (keep ON)
 RESTORE_RETRY_TICKS=10  # retry interval for a failed restore (s)
+CUT_REPIN=15            # v1.11.0: while the cut holds, re-write hpd=0 every N s
+CUT_LEVER=1             # v1.11.0: 1 = really cut via hpd=0 (0 = observe only)
 HB_TICKS=10             # heartbeat period (s)
 STATE_FILE=$LOGDIR/video.state
 MARKER=$LOGDIR/video_off
@@ -249,6 +289,20 @@ video_actual_on() {
     [ "$ACT_ST" = "connected" ] && [ "$ACT_EN" = "enabled" ] && video_real_streaming
 }
 
+# v1.11.0: what matters is "the sink is dark", not whether the connector still
+# reports itself connected. After hpd=0 the kernel re-asserts hotplug within
+# ~5s (status flips back to connected) while the encoder stays disabled and
+# pclock stays 0 - the screen is black either way. Judging on status alone
+# would make every cut look like a failure and re-poke the lever forever.
+video_cut_ok() {
+    refresh_actual
+    [ "$ACT_EN" = "disabled" ] || return 1
+    local p
+    p=$(dp_pclk)
+    case "$p" in ''|*[!0-9]*) return 0 ;; esac    # node unreadable: trust enabled
+    [ "$p" -eq 0 ]
+}
+
 # on | off | unknown  (authoritative, system_server query)
 screen_want() {
     local w
@@ -263,30 +317,54 @@ screen_want() {
 # ---- actions -------------------------------------------------------------
 
 cut_video() {
-    # v1.7.0: do NOT poke hpd here. Measured: "echo 0 > drm_dp/hpd" returns 0
-    # but changes nothing (status stays connected, enabled stays enabled, zero
-    # kernel log), so the old implementation "failed" three times per cut and
-    # counted down VIDEO_MAX_FAIL for no reason. The display stack already cuts
-    # the stream when the screen turns off (state 0x0, pclock 0), so this
-    # function only has to record the intent and confirm it happened.
+    # v1.11.0: actually cut. `echo 0 > drm_dp/hpd` tears the stream down within
+    # a second (status=disconnected enabled=disabled state=0x0 pclock=0) on a
+    # live 2560x1600@60 link - measured 2026-11-27, repeatable. v1.7.0 had
+    # declared this lever a no-op and left the encoder streaming, which is why
+    # the external panel kept showing the picture while the tablet was asleep.
+    # hpd=0 also does not need the VBUS guard: pulling HPD DOWN can never
+    # re-stream DP, only hpd=1 can.
     local i=0
+
+    if video_cut_ok; then
+        touch "$MARKER"
+        echo off > "$STATE_FILE"
+        log "video cut confirmed (encoder already off, status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
+        return 0
+    fi
+
+    if [ "$CUT_LEVER" != "1" ]; then
+        touch "$MARKER"
+        echo off > "$STATE_FILE"
+        log "video cut: lever disabled by config (CUT_LEVER=$CUT_LEVER) - observing only (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
+        return 0
+    fi
+
+    if ! ensure_hpd; then
+        log "video cut FAILED: $HPD_NODE unavailable (debugfs not mounted?) - screen stays lit"
+        return 1
+    fi
+
+    log "cut: hpd=0 (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
     while [ $i -lt 3 ]; do
-        refresh_actual
-        if video_actual_off; then
+        echo 0 > "$HPD_NODE" 2>/dev/null
+        sleep 1
+        if video_cut_ok; then
             touch "$MARKER"
             echo off > "$STATE_FILE"
-            log "video cut confirmed (display stack disabled the encoder, status=$ACT_ST enabled=$ACT_EN)"
+            log "video cut confirmed via hpd=0 (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
             return 0
         fi
-        sleep 1
         i=$((i + 1))
+        log "cut: still streaming after hpd=0 (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - retry $i/3"
     done
-    # Link still up a few seconds after the screen went off: nothing to cut with
-    # (hpd is inert), so accept it and leave the marker. Do not fail-loop.
-    touch "$MARKER"
-    echo off > "$STATE_FILE"
-    log "video cut: encoder still enabled (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - no usable cut lever on this kernel, leaving it to the display stack"
-    return 0
+
+    # Never claim success on a cut that did not happen: the caller counts
+    # failures and disables the feature (leaving video ON) after VIDEO_MAX_FAIL,
+    # which is the safe failure mode. No marker here - the link is still live.
+    refresh_actual
+    log "cut FAILED after 3 hpd=0 writes (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
+    return 1
 }
 
 # v1.9.2: the entry check in restore_video() is not enough.
@@ -340,28 +418,55 @@ restore_video() {
     fi
 
     local i=0 ok=0
-    # ---- step 1: virtual replug - the only lever that re-enumerates here ----
-    vbus_lost_mid_restore "step1/replug" && return 0
-    log "restore: not streaming (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - port_type virtual replug"
-    echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
-    sleep 2
-    echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
-    while [ $i -lt 12 ]; do
-        vbus_lost_mid_restore "step1/poll" && return 0
-        refresh_actual
-        if video_actual_on; then
-            ok=1
-            log "video restored via port_type replug (pclk=$(dp_pclk))"
-            break
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
+    # ---- step 0: HPD 0->1 - the resume edge, and it is instant --------------
+    # v1.11.0 measured: after a 1->0 cut, writing 1 puts the picture back in
+    # ~1s (status=connected enabled=enabled pclock=268500) - no replug, no USB
+    # drop. Writing 1 while HPD is already 1 is a no-op, which is exactly what
+    # v1.7.0 read as "hpd is inert"; that is why the ladder falls through to
+    # the replug below when this does nothing. We are past the VBUS gate above,
+    # so the 17:36 panic path is fenced off.
+    vbus_lost_mid_restore "step0/hpd" && return 0
+    if ensure_hpd; then
+        log "restore: hpd=1 (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk))"
+        echo 1 > "$HPD_NODE" 2>/dev/null
+        i=0
+        while [ $i -lt 3 ]; do
+            sleep 1
+            refresh_actual
+            if video_actual_on; then
+                ok=1
+                log "video restored via hpd=1 (pclk=$(dp_pclk))"
+                break
+            fi
+            i=$((i + 1))
+        done
+    fi
 
-    # ---- step 2: hpd simulate-connect (configures a connected link only) ----
-    [ "$ok" = "0" ] && { vbus_lost_mid_restore "step2/hpd" && return 0; }
+    # ---- step 1: virtual replug - re-enumerates a link that is really down ---
+    if [ "$ok" = "0" ]; then
+        vbus_lost_mid_restore "step1/replug" && return 0
+        log "restore: hpd=1 did not re-enable the encoder (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - port_type virtual replug"
+        echo sink > "$TYPEC_PORT/port_type" 2>/dev/null
+        sleep 2
+        echo dual > "$TYPEC_PORT/port_type" 2>/dev/null
+        i=0
+        while [ $i -lt 12 ]; do
+            vbus_lost_mid_restore "step1/poll" && return 0
+            refresh_actual
+            if video_actual_on; then
+                ok=1
+                log "video restored via port_type replug (pclk=$(dp_pclk))"
+                break
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+    fi
+
+    # ---- step 2: hpd=1 again after the replug (the 0->1 edge may be needed) --
     if [ "$ok" = "0" ] && ensure_hpd; then
-        log "restore: replug ineffective, trying hpd=1"
+        vbus_lost_mid_restore "step2/hpd" && return 0
+        log "restore: replug ineffective, re-asserting hpd=1"
         echo 1 > "$HPD_NODE" 2>/dev/null
         i=0
         while [ $i -lt 4 ]; do
@@ -369,7 +474,7 @@ restore_video() {
             refresh_actual
             if video_actual_on; then
                 ok=1
-                log "video restored via hpd=1 (pclk=$(dp_pclk))"
+                log "video restored via hpd=1 after replug (pclk=$(dp_pclk))"
                 break
             fi
             i=$((i + 1))
@@ -436,8 +541,9 @@ refresh_actual
 start_want=$(screen_want)
 if [ "$start_want" = "off" ]; then
     if link_present; then
-        video_actual_off || cut_video >/dev/null 2>&1
-        touch "$MARKER"      # keep the DP watchdog suppressed across restarts
+        if video_cut_ok || cut_video >/dev/null 2>&1; then
+            touch "$MARKER"      # keep the DP watchdog suppressed across restarts
+        fi
     else
         rm -f "$MARKER"
     fi
@@ -465,6 +571,7 @@ last_ev_line=""
 cut_fail=0
 slow=0
 slow_tick=0
+cut_tick=0
 tick=0
 hb_tick=0
 feed_fail=0
@@ -655,7 +762,7 @@ while true; do
     elif [ -n "$want" ] && { [ "$want" != "$last_want" ] || [ "$src" = "poll" ] || [ "$src" = "poll-fix" ]; }; then
         refresh_actual
         if [ "$want" = "off" ]; then
-            if video_actual_off; then
+            if video_cut_ok; then
                 [ -f "$MARKER" ] || { touch "$MARKER"; echo off > "$STATE_FILE"; }
             elif ! link_present; then
                 # nothing attached: nothing to cut, and no marker to suppress
@@ -711,6 +818,27 @@ while true; do
             phantom_notice=1
         else
             phantom_notice=0
+        fi
+    fi
+
+    # ---- v1.11.0: keep the cut in force ----
+    # The kernel re-asserts hotplug on its own ~5s after hpd=0 (status returns
+    # to connected while the encoder stays disabled). That half-asserted link
+    # is harmless for the picture, but it is not a state to sit in for hours:
+    # any PD re-negotiation in that window can flip the port around. Re-pin
+    # hpd=0 every CUT_REPIN seconds while the cut is meant to hold, and repair
+    # immediately if the encoder ever comes back on its own.
+    if [ "$last_want" = "off" ] && [ -f "$MARKER" ] && [ "$CUT_LEVER" = "1" ]; then
+        cut_tick=$((cut_tick + 1))
+        if [ "$cut_tick" -ge "$CUT_REPIN" ]; then
+            cut_tick=0
+            refresh_actual
+            if ! video_cut_ok; then
+                log "cut drifted while the screen is off (status=$ACT_ST enabled=$ACT_EN pclk=$(dp_pclk)) - re-cutting"
+                if cut_video >/dev/null 2>&1; then cut_fail=0; else cut_fail=$((cut_fail + 1)); fi
+            elif ensure_hpd; then
+                echo 0 > "$HPD_NODE" 2>/dev/null
+            fi
         fi
     fi
 

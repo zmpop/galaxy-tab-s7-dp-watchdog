@@ -275,13 +275,32 @@ adb shell su -c 'sh /data/local/tmp/deploy_direct.sh /data/local/tmp/tab-dp-watc
 
 | 操作 | 结果 | 判定 |
 |---|---|---|
-| `echo 0 > drm_dp/hpd` | `rc=0`、`status/enabled/pclk` 零变化、kmsg 零输出 | **空操作** |
-| `echo 1 > drm_dp/hpd` | `pclk` 0→268500，`dp_display_usbpd_configure_cb` 进内核日志 | 有效（但无供电时是 panic 路径） |
+| `echo 0 > drm_dp/hpd` | **11-27 重测：1 秒内 `disconnected` / `disabled` / `state=0x0` / `pclk=0`，5/5 可复现**（本节原记的「零变化」是错的，见下方修正） | 有效，但只切视频、不切 5V |
+| `echo 1 > drm_dp/hpd`（HPD 已经是 1） | 无变化 | **空操作**——写同一个值不会动任何东西 |
+| 切断之后 `echo 1 > drm_dp/hpd` | `pclk` 0→268500，1 秒回画面 | **有效（恢复就靠这个边沿）** |
 | `echo sink > port0/port_type` | 立刻断链、`usb/online 1→0`；**约 48 秒后内核重新装回 Source**，期间仍供 1.3–1.5A；回读 `[dual] source sink`，看起来"没生效" | 半有效，且比原厂 ~25s 自然翻转更差 |
 | `echo sink > power_role`（PR_SWAP） | 回读仍 `[source]` | 无效 |
 | `echo 0 > otg/online`（单次） | 1 秒内被充电驱动重新置 1 | 无效 |
 | **每 200ms 压 `otg/online=0`** | 电流从 -1600 附近掉到 -700 以下并保持 | **有效** |
 | 熄屏 | `state 0xa5→0x0`，整条链路拆除 | 有效，但连带拆画面 |
+
+### 修正（2026-11-27）：`hpd` 是边沿杠杆，不是空操作
+
+上表第一行「零变化」带偏了整个 v1.7.0–v1.10.0：`cut_video()` 据此删掉了唯一的切断
+动作，只写标记，**息屏后外接屏继续显示**（真机复现：屏幕 off 期间 `status=connected
+enabled=enabled pclock=268500` 持续数分钟，日志每 3~5 秒刷一行「no usable cut lever」）。
+
+真相是 `hpd` 只在**边沿**动作：1→0 拆链、0→1 重训，写同一个值是 no-op。当时是在
+`echo 1 > hpd` 之后立刻 `echo 0` 并马上读节点，链路还没回落就读，于是记成了「空操作」。
+重测结论（同一内核，活流 2560x1600@60，外部供电正常）：
+
+- `hpd=0`：1 秒内 `pclk=0`；约 5 秒后内核把 `status` 抬回 `connected`，但 `enabled`
+  仍是 `disabled`、`pclk` 仍是 0，画面仍然是黑的 → **判活不能用 `status`**；
+- `hpd=1`（紧接切断）：1 秒内 `pclk` 回到 268500，画面回来，且**不掉 USB**；
+- `port_type` 拔插只在「HPD 本来就是 1、链路因别的原因死了」时才需要。
+
+v1.11.0 按这三条重写：`cut_video()` 真写 `hpd=0`、判活用 `enabled=disabled &&
+pclk=0`、切断期间每 15 秒重压，恢复阶梯把 `hpd=1` 提到第一级。
 
 ### v1.8.0 的 sink 闸门为什么失败
 

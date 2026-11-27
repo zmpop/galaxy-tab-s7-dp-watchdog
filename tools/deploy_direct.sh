@@ -17,8 +17,14 @@ set -u
 # zip name is derived from module.prop in this checkout, so a version bump does
 # not silently deploy yesterday's package
 VER=$(grep '^version=' "$(dirname "$0")/../tab-dp-watchdog/module.prop" 2>/dev/null | cut -d= -f2)
-[ -n "${VER:-}" ] || VER=v1.7.0
-Z=${1:-/sdcard/Download/tab-dp-watchdog-$VER.zip}
+[ -n "${VER:-}" ] || VER=unknown
+# explicit argument wins: when this script runs from /data/local/tmp the repo
+# relative path above does not exist, so VER would be "unknown"
+if [ -n "${1:-}" ]; then
+    Z=$1
+else
+    Z=/sdcard/Download/tab-dp-watchdog-$VER.zip
+fi
 DEST=/data/adb/modules/tab_dp_watchdog
 TMP=/data/local/tmp/inst_deploy
 
@@ -30,11 +36,21 @@ say "sha256: $(sha256sum "$Z" 2>/dev/null | cut -d' ' -f1)"
 rm -rf "$TMP"
 mkdir -p "$TMP"
 /data/adb/magisk/busybox unzip -o "$Z" -x 'META-INF/*' -d "$TMP" >/dev/null 2>&1
-[ -d "$TMP/tab-dp-watchdog" ] || { say "FATAL: unexpected zip layout"; exit 1; }
+# v1.9.0+ archives put module.prop at the zip root (that is what Magisk needs);
+# the old tab-dp-watchdog/ prefix was the bug that made every install fail.
+# Accept both so this fallback path keeps working with old and new packages.
+if [ -d "$TMP/tab-dp-watchdog" ]; then
+    SRC=$TMP/tab-dp-watchdog
+elif [ -f "$TMP/module.prop" ]; then
+    SRC=$TMP
+else
+    say "FATAL: unexpected zip layout (no module.prop at root, no tab-dp-watchdog/)"
+    exit 1
+fi
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
-cp -a "$TMP/tab-dp-watchdog/." "$DEST/"
+cp -a "$SRC/." "$DEST/"
 say "extracted $(find "$DEST" -type f | wc -l) files into $DEST"
 
 # permissions: Magisk's set_perm_recursive equivalent

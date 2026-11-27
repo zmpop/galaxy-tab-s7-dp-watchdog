@@ -162,7 +162,7 @@ echo "B3 VBUS ok + sink dark -> port_type replug first, hpd never touched"
 setup 1 1 afterreplug
 restore_video; rc=$?
 check "rc=0"                                '[ "$rc" -eq 0 ]'
-check "replug wrote sink then dual"         '[ "$(writes)" = "sink dual " ]'
+check "hpd=1 then replug wrote sink then dual" '[ "$(writes)" = "1 sink dual " ]'
 check "marker cleared"                      '[ ! -f "$MARKER" ]'
 check "state=on"                            '[ "$(cat "$STATE_FILE")" = "on" ]'
 echo
@@ -171,7 +171,7 @@ echo
 echo "B4 replug ineffective -> hpd=1, then screen bounce (both gated)"
 setup 1 1 0
 restore_video; rc=$?
-check "replug attempted first"              '[ "$(writes | cut -d" " -f1-2 | sed "s/ *$//")" = "sink dual" ]'
+check "replug attempted before anything else" '[ "$(writes | cut -d" " -f1-3 | sed "s/ *$//")" = "1 sink dual" ]'
 check "hpd=1 only after replug"             'grep -qx "1" "$ECHOLOG"'
 check "screen bounce as last resort"        'grep -q "keyevent 26" "$INPUTLOG"'
 check "rc=1 (reported as failure, will retry)" '[ "$rc" -eq 1 ]'
@@ -196,7 +196,13 @@ echo
 # ---- C. static invariants (the regression class) ------------------------
 echo "C  static invariants"
 n_hpd=$(grep -c '> *"\$HPD_NODE"' "$SV")
-check "screenvid.sh has exactly 1 hpd write (restore rung 2)" '[ "$n_hpd" = "1" ]'
+check "hpd writes are the 4 intended sites (cut, replug raise, rung 2, re-pin)" '[ "$n_hpd" = "4" ]'
+check "cut_video really writes hpd=0 (v1.7.0 had deleted this - the v1.11.0 bug)" \
+    'printf "%s" "$(extract cut_video)" | grep -q "echo 0 > \"\$HPD_NODE\""'
+check "cut_video never writes hpd=1 (raising HPD is restore's job, VBUS-gated)" \
+    '! printf "%s" "$(extract cut_video)" | grep -q "echo 1 > \"\$HPD_NODE\""'
+check "re-pin loop keeps hpd=0 while the cut holds" \
+    'grep -q "cut_tick" "$SV" && grep -q "^CUT_REPIN=" "$SV"'
 guard_block=$(awk '/external VBUS observation/,/^$/' "$SV")
 check "VBUS observation block writes nothing to hpd" \
     '! printf "%s" "$guard_block" | grep -q "HPD_NODE *2"'
@@ -223,6 +229,68 @@ a=$(body_of "$SV" ext_vbus_ok); b=$(body_of "$SE" ext_vbus_ok)
 check "ext_vbus_ok match"  '[ -n "$a" ] && [ "$a" = "$b" ]'
 a=$(body_of "$SV" vbus_evidence); b=$(body_of "$SE" vbus_evidence)
 check "vbus_evidence match" '[ -n "$a" ] && [ "$a" = "$b" ]'
+echo
+
+# ---- E. cut_video(): the v1.11.0 regression fix -------------------------
+# v1.7.0 removed the hpd=0 write after a bad measurement, so from then until
+# v1.11.0 cut_video() was pure bookkeeping: the panel kept streaming with the
+# tablet asleep. These cases pin the behaviour back down.
+echo "E  cut_video(): hpd=0 is the lever, and it must really be written"
+CUTMODE=0          # 0 = link streaming, 1 = encoder off (sink dark)
+LINK_REACTS=1      # 1 = the fake kernel honours hpd=0
+echo() {
+    case "${1:-}" in
+        0) printf '0\n' >> "$ECHOLOG"; [ "$LINK_REACTS" = "1" ] && CUTMODE=1 ;;
+        1) printf '1\n' >> "$ECHOLOG" ;;
+        sink|dual) printf '%s\n' "$1" >> "$ECHOLOG" ;;
+    esac
+    command echo "$@"
+}
+refresh_actual() {
+    if [ "$CUTMODE" = "1" ]; then ACT_ST=disconnected; ACT_EN=disabled
+    else ACT_ST=connected; ACT_EN=enabled; fi
+}
+# the kernel re-asserts hotplug ~5s after hpd=0: status comes back, encoder not
+# (printf, not echo: the echo() wrapper above would log our own stub output)
+dp_pclk() { if [ "$CUTMODE" = "1" ]; then printf '0\n'; else printf '268500\n'; fi; }
+eval "$(extract video_cut_ok)"
+eval "$(extract cut_video)"
+
+cut_setup() {
+    CUTMODE=${1:-0}; LINK_REACTS=${2:-1}; CUT_LEVER=${3:-1}
+    : > "$ECHOLOG"; : > "$STUB_LOG"
+    rm -f "$MARKER" "$STATE_FILE"
+    [ -e "$HPD_NODE" ] || : > "$HPD_NODE"
+}
+
+cut_setup 0 1 1
+cut_video; rc=$?
+check "streaming -> cut succeeds"            '[ "$rc" -eq 0 ]'
+check "hpd=0 was really written"             'grep -qx "0" "$ECHOLOG"'
+check "marker set"                           '[ -f "$MARKER" ]'
+check "state=off"                            '[ "$(cat "$STATE_FILE")" = "off" ]'
+check "log says confirmed via hpd=0"         'grep -q "confirmed via hpd=0" "$STUB_LOG"'
+
+cut_setup 1 1 1
+cut_video; rc=$?
+check "already dark -> rc=0, no write"       '[ "$rc" -eq 0 ] && [ ! -s "$ECHOLOG" ]'
+check "already dark -> log says already off" 'grep -q "already off" "$STUB_LOG"'
+
+cut_setup 0 0 1                                  # kernel ignores hpd=0
+cut_video; rc=$?
+check "inert lever -> rc=1, never claim a cut" '[ "$rc" -eq 1 ]'
+check "3 attempts made"                      '[ "$(grep -cx "0" "$ECHOLOG")" = "3" ]'
+check "failed cut leaves NO marker (link still live)" '[ ! -f "$MARKER" ]'
+
+cut_setup 0 1 0
+cut_video; rc=$?
+check "CUT_LEVER=0 -> observe only, no write" '[ "$rc" -eq 0 ] && [ ! -s "$ECHOLOG" ]'
+check "CUT_LEVER=0 -> still marks the intent" '[ -f "$MARKER" ]'
+
+cut_setup 0 1 1; rm -f "$HPD_NODE"
+cut_video; rc=$?
+check "debugfs node missing -> rc=1"         '[ "$rc" -eq 1 ]'
+: > "$HPD_NODE"
 echo
 
 echo "=== result: $PASS passed, $FAIL failed ==="

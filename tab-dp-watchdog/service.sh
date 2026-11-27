@@ -202,6 +202,11 @@ hz_reevaluate() {
     fi
     echo 0 > "$HPD_NODE" 2>/dev/null
     sleep 2
+    # v1.11.0: this 0 -> 1 edge IS the re-enumeration lever (measured
+    # 2026-11-27: hpd 1->0 tears the stream down in 1s, 0->1 brings it back in
+    # 1s). Do NOT replace this with a port_type replug - that costs a USB drop
+    # for no gain. The pairing only works as an edge: writing 1 at a link whose
+    # HPD is already 1 does nothing (which is why v1.7.0 called it inert).
     echo 1 > "$HPD_NODE" 2>/dev/null
 }
 
@@ -305,7 +310,10 @@ release_handoff() {
         [ -e "$HPD_NODE" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null
         if ext_vbus_ok; then
             echo 1 > "$HPD_NODE" 2>/dev/null
-            log "switch: video_off cleared, hpd=1 (external VBUS present)"
+            # v1.11.0: the cut left HPD at 0, so this write IS the 0->1 edge
+            # that re-enables the encoder (~1s). No port_type replug here: that
+            # would drop USB for nothing. Same-value writes never move a lever.
+            log "switch: video_off cleared, hpd 0->1 (external VBUS present)"
         else
             log "switch: video_off cleared, HPD left LOW - no external VBUS ($(vbus_evidence))"
         fi

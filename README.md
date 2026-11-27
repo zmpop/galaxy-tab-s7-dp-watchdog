@@ -2,7 +2,7 @@
 
 **Magisk module — Samsung Galaxy Tab S7 USB-C DP Alt Mode 外接屏断链自动恢复看门狗**
 
-[![Release](https://img.shields.io/badge/release-v1.10.0-blue)](../../releases)
+[![Release](https://img.shields.io/badge/release-v1.11.0-blue)](../../releases)
 [![Platform](https://img.shields.io/badge/device-SM--T870%2FT970%20(SM8250)-green)](#兼容性)
 [![Root](https://img.shields.io/badge/requires-Magisk%20root-orange)](#安装)
 
@@ -23,6 +23,7 @@ Galaxy Tab S7（Snapdragon 865+ / SM8250）通过 USB-C 一线通（DP Alt Mode�
 | 5 | 拔掉屏幕 PD 供电后平板**异常重启**（内核 panic） | `usb/online=0` 且 `power_role=source`（平板在给屏供电） | v1.6.0 |
 | 6 | 拔掉屏幕 PD 后屏幕**仍有电**（平板以 ~1.9A 反供） | 同上，且对端支持 PD 或本次开机 DP 亮过 | v1.9.1 |
 | 7 | 恢复阶梯跑到一半被拔掉 PD，仍会强拉 HPD（panic 窗口） | 阶梯执行中 `usb/online` 变 0 | v1.9.2 |
+| 8 | 息屏后外接屏**继续显示**（视频没被切断） | 屏幕 off 而 `pclk>0`，`cut_video()` 只写标记不动链路 | v1.11.0 |
 
 平板单独使用（本次开机从未连接过屏幕）永不误触发；连接普通 PD 充电器、U 盘等 USB 配件不误触发。
 
@@ -53,13 +54,16 @@ v1.6.0 解决了「不崩溃」，但拔掉 PD 后屏幕**仍然有电**——�
 
 | 杠杆 | 实测结果 |
 |---|---|
-| `hpd=0` | **空操作**：`rc=0`、状态零变化、内核零日志 |
-| `hpd=1` | 有效（`pclk` 0→268500），但无供电时这就是 panic 路径，不能用 |
+| `hpd=1`（拉高） | DP 恢复（`pclk` 0→268500）；无供电时这就是 panic 路径，不能用 |
+| `hpd=0`（拉低） | 切 DP 有效（1 秒内 `pclk=0`），但**只切视频、不切 5V**——屏依旧被平板供电 |
 | `port_type=sink` | 立刻断链，但内核约 48 秒后重新装回 Source，期间仍供 1.3–1.5A；partner 挂着时更直接报 `invalid typec_role` 拒绝写入 |
 | `power_role=sink`（PR_SWAP） | 无效，回读仍 `[source]` |
 | `otg/online=0` 单次写 | 无效，充电驱动 1 秒内重新打开 |
 | **`otg/online=0` 持续压制（每 200ms）** | **有效，真正切断** |
 | 熄屏 | 有效，但会连带拆掉整条链路，不能用来「保画面只断电」 |
+
+> `hpd` 是**边沿**杠杆：只在 1→0 / 0→1 时动作，写同一个值毫无反应。v1.7.0 曾因此
+> 把 `hpd=0` 记成「空操作」并删掉它，导致息屏不再切视频（v1.11.0 已修复，见文末）。
 
 所以 v1.9.1 新增 `otgcut.sh`：外部 VBUS 连续 3 次采样缺失后接管，每 200ms 把
 `otg/online` 按回 0；PD 回来连续 20 次采样才释放。带安全闸——只有**对端声明支持 PD
@@ -92,6 +96,12 @@ restore ABORTED at step1/poll: external VBUS disappeared mid-repair (...) - hold
 
 反方向的省电能力：**按电源键息屏 → 立即停掉对外接屏的 DP 视频信号；亮屏 → 自动恢复**。
 实测切断约 1.1s、恢复约 1.1s，息屏期间触摸与供电不受影响。
+
+> 这段能力在 v1.7.0 被误删过：当时把 `hpd=0` 判成「空操作」，`cut_video()` 从此只写
+> 标记、不动链路，息屏后外接屏一直显示（2026-11-27 真机复现，`pclock` 全程 268500）。
+> 根因是 `hpd` 只在**边沿**上动作——v1.7.0 是在 HPD 已经是 1 的链路上写的 1，当然毫无
+> 反应。v1.11.0 恢复真切，并补上「切断期间每 15 秒重压一次」（内核约 5 秒会自己把
+> `status` 抬回 `connected`）与新的判活标准 `enabled=disabled && pclk=0`。
 
 ```
 息屏切换:  echo 0 > /sys/kernel/debug/drm_dp/hpd   # 连接器断开、链路拆除

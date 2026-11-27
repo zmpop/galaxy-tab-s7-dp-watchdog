@@ -3,6 +3,55 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)（MAJOR.MINOR.PATCH）。
 每个版本的完整发布说明见 [GitHub Releases](../../releases)。
 
+## v1.11.0
+
+### 修复：息屏不再切断视频输出（v1.7.0 引入的回归）
+
+**现象**：平板熄屏后外接屏继续显示桌面，`screenvid` 日志每 3~5 秒重复一行
+`video cut: encoder still enabled ... no usable cut lever on this kernel`，
+但链路始终 `status=connected enabled=enabled pclock=268500`。
+
+**根因**：v1.7.0 依据一次测量结论「`echo 0 > drm_dp/hpd` 是空操作」把唯一有效
+的切断杠杆删掉了，`cut_video()` 从此只写标记、不碰链路。那个测量是错的——
+这次在真机同一内核（SM-T970 / T970ZCS7DXH1）上重测，2560x1600@60 活流，
+外部供电正常：
+
+| 操作 | 1 秒内结果 | 5 秒后 |
+|---|---|---|
+| `echo 0 > drm_dp/hpd` | `disconnected` / `disabled` / `state=0x0` / `pclock=0` | 内核自己把 hotplug 抬回 `connected`，但 `enabled` 仍 `disabled`、`pclock` 仍 `0`（画面仍是黑的）；5/5 可复现 |
+| `echo 1 > drm_dp/hpd`（HPD 本来就是 1） | 毫无变化 | 毫无变化——**写同一个值是空操作**，v1.7.0 就是这样把它误判成「节点失效」的 |
+| 切断之后紧接 `echo 1 > drm_dp/hpd` | `connected` / `enabled` / `pclock` 恢复 | 画面回来（实测 19:26：537260 → 0 → 268500），约 1 秒 |
+| `port_type` sink→dual | `connected` / `enabled` / `state=0xa5` / `pclock=268500` | 画面回来 |
+
+即：**切 = HPD 1→0，恢复 = HPD 0→1**。杠杆只在**边沿**上动作，写同一个值
+什么都不会发生——这正是 v1.7.0 那次误判的全部原因。
+
+**改动**
+
+1. `cut_video()` 真写 `hpd=0`，1 秒粒度复查，最多 3 次；成功才落标记，失败
+   返回 1（不再谎报成功，让 `VIDEO_MAX_FAIL` 计数能真正生效）。
+   `hpd=0` 是**向下**拉 HPD，不可能重新上流，所以不需要 VBUS 守卫（只有
+   `hpd=1` 才是 17:36 的 panic 路径）。
+2. 新增 `video_cut_ok()`：判据改为 `enabled=disabled && pclock=0`。内核 5 秒后
+   会把 `status` 抬回 `connected`，只看 `status` 会把每次成功的切断都当成失败，
+   然后无限重复 poke。
+3. 新增 `CUT_REPIN=15`：切断期间每 15 秒重压一次 `hpd=0`，避免长时间停在
+   「connected 但编码器关」的半链状态（PD 重新协商路过这个状态容易翻车）。
+4. 新增 `CUT_LEVER`（默认 1）：设 0 退回「只观察不动作」，便于现场对比。
+5. `restore_video()` 阶梯重排为 **`hpd=1` → 虚拟拔插 → 再 `hpd=1` → 熄屏亮屏**：
+   第一级就是那个 0→1 边沿，实测 1 秒回画面且**不掉 USB**（此前 replug 走第一步，
+   恢复要 6~7 秒，还会让 `usb/online` 瞬断一次）。拔插降级为「HPD 本来就是 1、
+   链路因别的原因断了」时的兜底。
+6. `service.sh` 两处（`hz_reevaluate()` 切刷新率、`release_handoff()` 关总开关）
+   就地写明边沿语义：它们的 `0 -> 1` 本来就是完整边沿、本来就对，**不要**改成
+   虚拟拔插——那会白掉一次 USB。`release_handoff` 里明确「切断后 HPD 已是 0，
+   这一写就是边沿」。
+
+测试：`tests/vbus_guard_test.sh` 扩到 51 条（新增 12 条：活流切断、已黑不重复
+写、杠杆失效时 3 次后报错且不留标记、`CUT_LEVER=0`、debugfs 节点缺失、静态
+断言「cut_video 里有 `echo 0` 且没有 `echo 1`」）。连同 otgcut 14 + 总开关 39 +
+sink 闸门 25 + 卸载 15 全通过。
+
 ## v1.10.0
 
 ### 新增：Web 界面「启用模块」总开关（默认启用）
